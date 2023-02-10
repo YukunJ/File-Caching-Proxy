@@ -1,7 +1,7 @@
 # this is my proxyport and pin used locally
 export proxyport15440=20080
 export pin15440=990105702
-export CLASSPATH=${PWD}/../lib:${PWD}/lib:${PWD}/../filecache:${PWD}/filecache
+export CLASSPATH=${PWD}:${PWD}/../lib:${PWD}/lib:${PWD}/../filecache:${PWD}/filecache
 # LD_PRELOAD=../lib/lib440lib.so tools/440read foo
 
 # define compiler and compiler flag variables

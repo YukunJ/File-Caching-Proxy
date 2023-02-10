@@ -20,10 +20,15 @@ import java.util.HashSet;
  It relies on the Cache class to take care of
  underlying file caching and replacement operation
  and operates mainly on java's RandomAccessFile
+
+ Mostly, it delegates the open/close operations to Cache
+ and do the rest 4 operations on its own since it keeps a mapping
+ from fd to opened RandomAccessFile
  */
 class Proxy {
   private static final Cache cache = new Cache();
   private static class FileHandler implements FileHandling {
+    /* dummy offset for directory-only */
     private final static int DIRECTORY_FD_OFFSET = 2048;
     private int directory_fd_;
     private final HashMap<Integer, RandomAccessFile> fd_filehandle_map_;
@@ -46,7 +51,7 @@ class Proxy {
           return Errors.EISDIR;
         }
         if (new File(normalized_path).canRead()) {
-          // not going to do anything with the directory fd, give back a dummy
+          // not going to do anything with the directory fd, give back a dummy fd
           int fd = directory_fd_++;
           fd_directory_set_.add(fd);
           return fd;

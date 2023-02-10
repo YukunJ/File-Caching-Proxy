@@ -1,12 +1,3 @@
-import java.io.File;
-import java.io.FileNotFoundException;
-import java.io.IOException;
-import java.io.RandomAccessFile;
-import java.nio.file.Files;
-import java.nio.file.StandardCopyOption;
-import java.util.HashMap;
-import java.util.concurrent.locks.ReentrantLock;
-
 /**
  * file: Cache.java
  * author: Yukun Jiang
@@ -24,12 +15,22 @@ import java.util.concurrent.locks.ReentrantLock;
  * count drops to zero.
  */
 
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.io.RandomAccessFile;
+import java.nio.file.FileSystemException;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
+import java.util.HashMap;
+import java.util.concurrent.locks.ReentrantLock;
+
 /**
  * Simple logging tool print to stderr
  */
 class Logger {
   public static void Log(String msg) {
-    System.err.println(msg);
+    System.err.println("###Logger### " + msg);
   }
   public static String OpenOptionToString(FileHandling.OpenOption option) {
     if (option == FileHandling.OpenOption.READ) {
@@ -108,8 +109,10 @@ class FileRecord {
 
   private final HashMap<Integer, Version> version_map_;
 
+  /* the latest reader-visible version */
   private int reader_version_;
 
+  /* the latest spawn version by writer */
   private int latest_version_;
 
   public FileRecord(String filename, int reader_version, int latest_version) {
@@ -131,19 +134,34 @@ class FileRecord {
     int reader_version_id = GetReaderVersionId();
     Version reader_version = GetReaderVersion();
     String reader_filename = reader_version.ToFileName();
-    RandomAccessFile file_handle = null;
-    try {
-      file_handle = new RandomAccessFile(reader_filename, reader_mode);
-      reader_version.PlusRefCount();
-    } catch (Exception e) {
-      e.printStackTrace();
-      throw e;
-    }
+    RandomAccessFile file_handle = new RandomAccessFile(reader_filename, reader_mode);
+    Logger.Log("GerReaderFile for " + filename_ + " with reader_version=" + reader_version_id);
+    reader_version.PlusRefCount();
     return new FileReturnVal(file_handle, reader_version_id);
   }
 
-  public FileReturnVal GetWriterFile() {
-    return new FileReturnVal(null, 0);
+  /**
+   * Get an exclusive writer copy of this file
+   * if an existing version exist, make a copy and start from there
+   * otherwise create an empty file to work with
+   */
+  public FileReturnVal GetWriterFile() throws Exception {
+    final String writer_mode = "rw";
+    int writer_version_id = IncrementLatestVersionId();
+    Version writer_version = new Version(filename_, writer_version_id);
+    String writer_filename = writer_version.ToFileName();
+    Logger.Log(
+        "GetWriteFile() for " + filename_ + " with writer_version=" + writer_version.version_);
+    if (GetReaderVersionId() >= 0) {
+      // there is existing version, copy it
+      String reader_filename = GetReaderVersion().ToFileName();
+      CopyFile(writer_filename, reader_filename);
+      Logger.Log("Make a copy from " + reader_filename + " to " + writer_filename);
+    }
+    RandomAccessFile file_handle = new RandomAccessFile(writer_filename, writer_mode);
+    version_map_.put(writer_version_id, writer_version);
+    writer_version.PlusRefCount();
+    return new FileReturnVal(file_handle, writer_version_id);
   }
 
   /**
@@ -160,7 +178,19 @@ class FileRecord {
     }
   }
 
-  public void CloseWriterFile(int version_id) {}
+  /**
+   * Close an exclusive version of this file
+   * and install this to be the newest visible reader version
+   */
+  public void CloseWriterFile(int version_id) {
+    Version writer_version = version_map_.get(version_id);
+    // must be 0 now
+    assert (writer_version.MinusRefCount() == 0);
+    // install to be available new reader version
+    int install_version_id = writer_version.version_;
+    SetReaderVersionId(install_version_id);
+    // should not remove this version from map, future reader need it
+  }
 
   public int IncrementLatestVersionId() {
     return ++latest_version_;
@@ -183,14 +213,10 @@ class FileRecord {
   /**
    * copy the file specified by src_name into a new file named by dest_name
    */
-  public static void CopyFile(String dest_name, String src_name) {
+  public static void CopyFile(String dest_name, String src_name) throws Exception {
     File src = new File(src_name);
     File dest = new File(dest_name);
-    try {
-      Files.copy(src.toPath(), dest.toPath(), StandardCopyOption.REPLACE_EXISTING);
-    } catch (Exception e) {
-      e.printStackTrace();
-    }
+    Files.copy(src.toPath(), dest.toPath(), StandardCopyOption.REPLACE_EXISTING);
   }
 
   /**
@@ -202,23 +228,24 @@ class FileRecord {
       boolean success = file.delete();
     } catch (Exception e) {
       e.printStackTrace();
-      ;
     }
   }
 }
+
 public class Cache {
+  /* regular file descriptor offset */
   private static final int INIT_FD = 1024;
   private static final int EIO = -5;
   private int cache_fd_;
-  private HashMap<String, FileRecord> record_map_;
-  private HashMap<Integer, RandomAccessFile> fd_handle_map_;
-  private HashMap<Integer, String> fd_filename_map_;
+  private final HashMap<String, FileRecord> record_map_;
+  private final HashMap<Integer, RandomAccessFile> fd_handle_map_;
+  private final HashMap<Integer, String> fd_filename_map_;
 
-  private HashMap<Integer, Integer> fd_version_map_;
+  private final HashMap<Integer, Integer> fd_version_map_;
 
-  private HashMap<Integer, FileHandling.OpenOption> fd_option_map_;
+  private final HashMap<Integer, FileHandling.OpenOption> fd_option_map_;
 
-  private ReentrantLock mtx_;
+  private final ReentrantLock mtx_;
 
   public Cache() {
     cache_fd_ = INIT_FD;
@@ -230,6 +257,7 @@ public class Cache {
     mtx_ = new ReentrantLock();
   }
 
+  /* do book-keeping after a successful open */
   public int Register(
       String filename, RandomAccessFile file_handle, int version, FileHandling.OpenOption option) {
     // generate a fd for this register request
@@ -264,6 +292,8 @@ public class Cache {
     String filename = fd_filename_map_.get(fd);
     FileRecord record = record_map_.get(filename);
     file_handle.close();
+    // need to physically close this file
+    // before make it visible to other threads
     if (option == FileHandling.OpenOption.READ) {
       record.CloseReaderFile(version_id);
     } else {
@@ -275,6 +305,10 @@ public class Cache {
     fd_filename_map_.remove(fd);
   }
 
+  /**
+   * Proxy delegate the open functionality to cache
+   * it should properly handle Exception and return corresponding error code if applicable
+   */
   public OpenReturnVal open(String path, FileHandling.OpenOption option) {
     mtx_.lock();
     try {
@@ -307,8 +341,35 @@ public class Cache {
           record_map_.put(path, record);
           return GetAndRegisterFile(record, path, option);
         }
+      } else {
+        // other 3 modifying operations
+        if (option == FileHandling.OpenOption.CREATE_NEW && new File(path).exists()) {
+          return new OpenReturnVal(null, FileHandling.Errors.EEXIST);
+        }
+        if (option == FileHandling.OpenOption.WRITE) {
+          if (!(new File(path).exists())) {
+            // no exist
+            return new OpenReturnVal(null, FileHandling.Errors.ENOENT);
+          }
+          if (!(new File(path).canWrite())) {
+            // permission problem
+            return new OpenReturnVal(null, FileHandling.Errors.EPERM);
+          }
+        }
+        // TODO: duplicate code from above branch, try to modularize this
+        FileRecord record = record_map_.get(path);
+        if (record == null) {
+          if (new File(path).exists()) {
+            // enable write-copy from the existing reader version
+            record = new FileRecord(path, 0, 0);
+          } else {
+            record = new FileRecord(path, -1, -1);
+          }
+          record_map_.put(path, record);
+        }
+        return GetAndRegisterFile(record, path, option);
       }
-    } catch (FileNotFoundException e) {
+    } catch (FileSystemException | FileNotFoundException e) {
       // already check for filenotfound above, assume it is permission problem
       e.printStackTrace();
       return new OpenReturnVal(null, FileHandling.Errors.EPERM);
