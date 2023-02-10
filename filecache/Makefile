@@ -1,7 +1,7 @@
 # this is my proxyport and pin used locally
 export proxyport15440=20080
 export pin15440=990105702
-export CLASSPATH=${PWD}:${PWD}/../lib:${PWD}/lib:${PWD}/../filecache:${PWD}/filecache
+export CLASSPATH=${PWD}:${PWD}/../lib
 # LD_PRELOAD=../lib/lib440lib.so tools/440read foo
 
 # define compiler and compiler flag variables
@@ -30,7 +30,7 @@ submit:
 .PHONY: clean
 clean:
 	# remove all the files with extension .class and executable with tar
-	rm -f *.class ../mysolution.tgz
+	rm -f *.class ../mysolution.tgz tester.txt*
 
 # personal tester build
 .PHONY: tester

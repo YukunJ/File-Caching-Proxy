@@ -29,7 +29,13 @@ import java.util.concurrent.locks.ReentrantLock;
  * Simple logging tool print to stderr
  */
 class Logger {
+  private static int count = 0;
+  private static final int LOG_MAX = 1000;
   public static void Log(String msg) {
+    // tunable parameter to control the maximum amount of LOGGING
+    if (count++ > LOG_MAX) {
+      return;
+    }
     System.err.println("###Logger### " + msg);
   }
   public static String OpenOptionToString(FileHandling.OpenOption option) {
@@ -343,17 +349,35 @@ public class Cache {
         }
       } else {
         // other 3 modifying operations
-        if (option == FileHandling.OpenOption.CREATE_NEW && new File(path).exists()) {
-          return new OpenReturnVal(null, FileHandling.Errors.EEXIST);
+        if (option == FileHandling.OpenOption.CREATE_NEW) {
+          // possibility 1: already exists on disk and it's first access
+          if (!record_map_.containsKey(path) && new File(path).exists()) {
+            return new OpenReturnVal(null, FileHandling.Errors.EEXIST);
+          }
+          // possibility 2: other writer has created it but not close yet
+          if (record_map_.containsKey(path) && record_map_.get(path).GetReaderVersionId() >= 0) {
+            return new OpenReturnVal(null, FileHandling.Errors.EEXIST);
+          }
         }
         if (option == FileHandling.OpenOption.WRITE) {
-          if (!(new File(path).exists())) {
-            // no exist
-            return new OpenReturnVal(null, FileHandling.Errors.ENOENT);
-          }
-          if (!(new File(path).canWrite())) {
-            // permission problem
-            return new OpenReturnVal(null, FileHandling.Errors.EPERM);
+          if (!record_map_.containsKey(path)) {
+            // first access
+            if (!(new File(path).exists())) {
+              // not exist
+              return new OpenReturnVal(null, FileHandling.Errors.ENOENT);
+            }
+            if (!(new File(path).canWrite())) {
+              // permission problem
+              return new OpenReturnVal(null, FileHandling.Errors.EPERM);
+            }
+          } else {
+            if (record_map_.get(path).GetReaderVersionId() < 0) {
+              // some writer has created this file but should not be visible now
+              return new OpenReturnVal(null, FileHandling.Errors.ENOENT);
+            }
+            if (!(new File(record_map_.get(path).GetReaderVersion().ToFileName())).canWrite()) {
+              return new OpenReturnVal(null, FileHandling.Errors.EPERM);
+            }
           }
         }
         // TODO: duplicate code from above branch, try to modularize this
