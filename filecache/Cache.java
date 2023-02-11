@@ -53,6 +53,19 @@ class Logger {
     }
     return "Unknown";
   }
+
+  public static String SeekOptionToString(FileHandling.LseekOption option) {
+    if (option == FileHandling.LseekOption.FROM_CURRENT) {
+      return "FROM_CURRENT";
+    }
+    if (option == FileHandling.LseekOption.FROM_START) {
+      return "FROM_START";
+    }
+    if (option == FileHandling.LseekOption.FROM_END) {
+      return "FROM_END";
+    }
+    return "Unknown";
+  }
 }
 
 /* For Cache returns to Proxy */
@@ -338,6 +351,8 @@ public class Cache {
             // file not exist
             return new OpenReturnVal(null, FileHandling.Errors.ENOENT);
           }
+          if (!f.isFile()) {
+          }
           if (!f.canRead()) {
             // permission problem
             return new OpenReturnVal(null, FileHandling.Errors.EPERM);
@@ -365,6 +380,10 @@ public class Cache {
             if (!(new File(path).exists())) {
               // not exist
               return new OpenReturnVal(null, FileHandling.Errors.ENOENT);
+            }
+            if (!(new File(path).isFile())) {
+              // not a regular file
+              return new OpenReturnVal(null, FileHandling.Errors.EPERM);
             }
             if (!(new File(path).canWrite())) {
               // permission problem
@@ -424,6 +443,39 @@ public class Cache {
       mtx_.unlock();
     }
     return -1; // indicate any other form of error
+  }
+
+  public int unlink(String path) {
+    mtx_.lock();
+    try {
+      // first check if this is a directory
+      File file = new File(path);
+      if (file.exists() && file.isDirectory()) {
+        return FileHandling.Errors.EISDIR;
+      }
+      // divide into cases by if the record exists for this file
+      FileRecord record = record_map_.get(path);
+      if (record != null) {
+        // so readers will not be able to see it, until any writer returns
+        record.SetReaderVersionId(-1);
+        return 0;
+        // TODO: in cpkt2&3 actually need to delete the file, need some kind of reference counting
+      } else {
+        if (!file.exists()) {
+          return FileHandling.Errors.ENOENT;
+        }
+        boolean res = file.delete();
+        return 0;
+      }
+    } catch (SecurityException e) {
+      e.printStackTrace();
+      return FileHandling.Errors.EPERM;
+    } catch (Exception e) {
+      e.printStackTrace();
+    } finally {
+      mtx_.unlock();
+    }
+    return EIO; // indicate any other form of error
   }
 
   public static void main(String[] args) {

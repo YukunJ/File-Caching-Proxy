@@ -24,7 +24,7 @@ format:
 .PHONY: submit
 submit:
 	# submit by compressing tar
-	tar cvzf ../mysolution.tgz Makefile Proxy.java
+	tar cvzf ../mysolution.tgz Makefile Proxy.java Cache.java
 
 # clean up command
 .PHONY: clean

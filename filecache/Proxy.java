@@ -135,11 +135,40 @@ class Proxy {
     }
 
     public long lseek(int fd, long pos, LseekOption o) {
-      return Errors.ENOSYS;
+      Logger.Log("lseek request: fd=" + fd + " pos=" + pos
+          + " LseekOption=" + Logger.SeekOptionToString(o));
+      if (!fd_filehandle_map_.containsKey(fd) || fd_directory_set_.contains(fd)) {
+        return Errors.EBADF;
+      }
+      RandomAccessFile file_handle = fd_filehandle_map_.get(fd);
+      try {
+        long curr_pos = file_handle.getFilePointer();
+        long total_len = file_handle.length();
+        long target_pos;
+        if (o == LseekOption.FROM_CURRENT) {
+          target_pos = curr_pos + pos;
+        } else if (o == LseekOption.FROM_START) {
+          target_pos = pos;
+        } else {
+          target_pos = total_len + pos;
+        }
+        if (target_pos < 0) {
+          // negative seek is not allowed
+          return Errors.EINVAL;
+        }
+        file_handle.seek(target_pos);
+        return target_pos;
+      } catch (IOException e) {
+        e.printStackTrace();
+      }
+      // unknown exception placeholder
+      return EIO;
     }
 
     public int unlink(String path) {
-      return Errors.ENOSYS;
+      String normalized_path = Paths.get(path).normalize().toString();
+      Logger.Log("unlink request: path=" + path + " normalized=" + normalized_path);
+      return cache.unlink(normalized_path);
     }
 
     public void clientdone() {
