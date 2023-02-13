@@ -66,9 +66,15 @@ class Proxy {
         return FileHandling.Errors.EBADF;
       }
       if (fd_filehandle_map_.containsKey(fd)) {
-        fd_filehandle_map_.remove(fd);
-        fd_option_map_.remove(fd);
-        return cache.close(fd);
+        RandomAccessFile handle = fd_filehandle_map_.get(fd);
+        try {
+          handle.close();
+          fd_filehandle_map_.remove(fd);
+          fd_option_map_.remove(fd);
+          return cache.close(fd);
+        } catch (IOException e) {
+          return EIO;
+        }
       } else {
         // close a dummy directory
         fd_directory_set_.remove(fd);
@@ -161,7 +167,7 @@ class Proxy {
     public void clientdone() {
       // TODO: in cpkt2&3, notice proxy/server to clear up space
       for (int open_fd : fd_filehandle_map_.keySet()) {
-        cache.close(open_fd);
+        close(open_fd);
       }
     }
   }
