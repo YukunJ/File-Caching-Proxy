@@ -66,18 +66,26 @@ class Logger {
     }
     return "Unknown";
   }
+
+  public static String CheckResultToString(CheckResult result) {
+    return "If exist: " + result.exist + "\nIf directory: " + result.is_directory
+        + "\nIf regular: " + result.is_regular_file + "\nIf can read: " + result.can_read
+        + "\nIf can write: " + result.can_write;
+  }
 }
 
 /* For Cache returns to Proxy */
 class OpenReturnVal {
   /* if success, a RandomAccessFile handle is returned */
-  public RandomAccessFile file_handle_;
+  public RandomAccessFile file_handle;
   /* might be negative to indicate error */
-  public int fd_;
-
-  OpenReturnVal(RandomAccessFile file_handle, int fd) {
-    file_handle_ = file_handle;
-    fd_ = fd;
+  public int fd;
+  /* might be a trivial directoyr */
+  public boolean is_directory;
+  OpenReturnVal(RandomAccessFile file_handle, int fd, boolean is_directory) {
+    this.file_handle = file_handle;
+    this.fd = fd;
+    this.is_directory = is_directory;
   }
 }
 
@@ -88,6 +96,24 @@ class FileReturnVal {
   public FileReturnVal(RandomAccessFile handle, int version) {
     file_handle_ = handle;
     version_ = version;
+  }
+}
+
+/* the aggregated info when check-on-use with server */
+class CheckResult {
+  boolean exist;
+  boolean is_directory;
+  boolean is_regular_file;
+  boolean can_read;
+  boolean can_write;
+
+  public CheckResult(boolean exist, boolean is_directory, boolean is_regular_file, boolean can_read,
+      boolean can_write) {
+    this.exist = exist;
+    this.is_directory = is_directory;
+    this.is_regular_file = is_regular_file;
+    this.can_read = can_read;
+    this.can_write = can_write;
   }
 }
 
@@ -128,12 +154,15 @@ class FileRecord {
 
   private final HashMap<Integer, Version> version_map_;
 
-  /* the latest reader-visible version */
+  /* the latest reader-visible version, if -1 means no one can see this file now */
   private int reader_version_;
 
-  /* the latest spawn version by writer */
+  /* the latest spawn version by writer, monotonically increasing */
   private int latest_version_;
 
+  /* if the file already exists on disk, reader_version is init to 0
+     if new writer create this file, reader_version is init to -1 so no one sees it until commit
+   */
   public FileRecord(String filename, int reader_version, int latest_version) {
     filename_ = filename;
     reader_version_ = reader_version;
@@ -149,6 +178,7 @@ class FileRecord {
    * caller should ensure that reader_version >= 0 already
    */
   public FileReturnVal GetReaderFile() throws Exception {
+    assert (reader_version_ >= 0);
     final String reader_mode = "r";
     int reader_version_id = GetReaderVersionId();
     Version reader_version = GetReaderVersion();
@@ -162,7 +192,7 @@ class FileRecord {
   /**
    * Get an exclusive writer copy of this file
    * if an existing version exist, make a copy and start from there
-   * otherwise create an empty file to work with
+   * otherwise create an empty file to start work with
    */
   public FileReturnVal GetWriterFile() throws Exception {
     final String writer_mode = "rw";
@@ -178,7 +208,7 @@ class FileRecord {
       Logger.Log("Make a copy from " + reader_filename + " to " + writer_filename);
     }
     RandomAccessFile file_handle = new RandomAccessFile(writer_filename, writer_mode);
-    version_map_.put(writer_version_id, writer_version);
+    version_map_.put(writer_version_id, writer_version); // must be an exclusive version
     writer_version.PlusRefCount();
     return new FileReturnVal(file_handle, writer_version_id);
   }
@@ -192,7 +222,7 @@ class FileRecord {
     int remain_ref_count = reader_version.MinusRefCount();
     if (remain_ref_count == 0 && version_id != GetReaderVersionId()) {
       // no more client will see this version
-      version_map_.remove(version_id);
+      // version_map_.remove(version_id);
       // TODO: remove this version's associated disk file to clear cache space
     }
   }
@@ -226,6 +256,11 @@ class FileRecord {
     return version_map_.get(reader_version_);
   }
   public void SetReaderVersionId(int new_reader_version) {
+    int old_reader_version_ = reader_version_;
+    if (old_reader_version_ != new_reader_version && GetReaderVersion() != null
+        && GetReaderVersion().GetRefCount() == 0) {
+      // #TODO: no one refers to old reader version, could do some clean up
+    }
     reader_version_ = new_reader_version;
   }
 
@@ -252,10 +287,67 @@ class FileRecord {
 }
 
 public class Cache {
-  /* regular file descriptor offset */
+  /* Checkpoint 1 version of FileChecker, will be moved to server side in ckpt 2 & 3 */
+  class CacheFileChecker implements FileChecker {
+    @Override
+    public boolean IfExist(String path) {
+      FileRecord record = record_map_.get(path);
+      if (record == null) {
+        // check on local disk
+        return new File(path).exists();
+      } else {
+        // -1 reader version indicates currently invisible
+        return record.GetReaderVersionId() >= 0;
+      }
+    }
+
+    @Override
+    public boolean IfDirectory(String path) {
+      return new File(path).isDirectory();
+    }
+
+    @Override
+    public boolean IfRegularFile(String path) {
+      FileRecord record = record_map_.get(path);
+      if (record != null && record.GetReaderVersionId() >= 0) {
+        return new File(record.GetReaderVersion().ToFileName()).isFile();
+      } else {
+        return new File(path).isFile();
+      }
+    }
+
+    @Override
+    public boolean IfCanRead(String path) {
+      FileRecord record = record_map_.get(path);
+      if (record != null && record.GetReaderVersionId() >= 0) {
+        return new File(record.GetReaderVersion().ToFileName()).canRead();
+      } else {
+        return new File(path).canRead();
+      }
+    }
+
+    @Override
+    public boolean IfCanWrite(String path) {
+      FileRecord record = record_map_.get(path);
+      if (record != null && record.GetReaderVersionId() >= 0) {
+        return new File(record.GetReaderVersion().ToFileName()).canWrite();
+      } else {
+        return new File(path).canWrite();
+      }
+    }
+
+    @Override
+    public CheckResult Check(String path) {
+      return new CheckResult(
+          IfExist(path), IfDirectory(path), IfRegularFile(path), IfCanRead(path), IfCanWrite(path));
+    }
+  }
+
+  /* file descriptor offset */
   private static final int INIT_FD = 1024;
   private static final int EIO = -5;
   private int cache_fd_;
+  private final FileChecker checker_;
   private final HashMap<String, FileRecord> record_map_;
   private final HashMap<Integer, RandomAccessFile> fd_handle_map_;
   private final HashMap<Integer, String> fd_filename_map_;
@@ -268,6 +360,7 @@ public class Cache {
 
   public Cache() {
     cache_fd_ = INIT_FD;
+    checker_ = new CacheFileChecker();
     record_map_ = new HashMap<>();
     fd_handle_map_ = new HashMap<>();
     fd_filename_map_ = new HashMap<>();
@@ -289,6 +382,7 @@ public class Cache {
     return fd;
   }
 
+  /* after making sure we can access and open this file, make such a request */
   public OpenReturnVal GetAndRegisterFile(
       FileRecord record, String path, FileHandling.OpenOption option) throws Exception {
     FileReturnVal return_val;
@@ -299,11 +393,12 @@ public class Cache {
     }
     RandomAccessFile file_handle = return_val.file_handle_;
     int version = return_val.version_;
-    // register book-keeping
+    // register for bookkeeping
     int fd = Register(path, file_handle, version, option);
-    return new OpenReturnVal(file_handle, fd);
+    return new OpenReturnVal(file_handle, fd, false);
   }
 
+  /* Upon closing a fd, remove it from mapping record */
   public void DeregisterFile(int fd) throws Exception {
     RandomAccessFile file_handle = fd_handle_map_.get(fd);
     int version_id = fd_version_map_.get(fd);
@@ -326,107 +421,180 @@ public class Cache {
 
   /**
    * Proxy delegate the open functionality to cache
+   * and cache make local disk operations based on check-on-use results from the server
    * it should properly handle Exception and return corresponding error code if applicable
    */
   public OpenReturnVal open(String path, FileHandling.OpenOption option) {
     mtx_.lock();
     try {
-      if (option == FileHandling.OpenOption.READ) {
-        // existing read only
-        FileRecord record = record_map_.get(path);
-        if (record != null) {
-          // has a record, not necessarily valid for read
-          int reader_version = record.GetReaderVersionId();
-          if (reader_version < 0) {
-            // equivalent to file not found
-            return new OpenReturnVal(null, FileHandling.Errors.ENOENT);
-          } else {
-            // grab a shared copy of reader version
-            return GetAndRegisterFile(record, path, option);
-          }
-        } else {
-          // fresh read, check existence and create FileRecord
-          File f = new File(path);
-          if (!f.exists()) {
-            // file not exist
-            return new OpenReturnVal(null, FileHandling.Errors.ENOENT);
-          }
-          if (!f.isFile()) {
-          }
-          if (!f.canRead()) {
-            // permission problem
-            return new OpenReturnVal(null, FileHandling.Errors.EPERM);
-          }
-          // create FileRecord for it
-          record = new FileRecord(path, 0, 0);
-          record_map_.put(path, record);
-          return GetAndRegisterFile(record, path, option);
-        }
-      } else {
-        // other 3 modifying operations
-        if (option == FileHandling.OpenOption.CREATE_NEW) {
-          // possibility 1: already exists on disk and it's first access
-          if (!record_map_.containsKey(path) && new File(path).exists()) {
-            return new OpenReturnVal(null, FileHandling.Errors.EEXIST);
-          }
-          // possibility 2: other writer has created it but not close yet
-          if (record_map_.containsKey(path) && record_map_.get(path).GetReaderVersionId() >= 0) {
-            return new OpenReturnVal(null, FileHandling.Errors.EEXIST);
-          }
-        }
-        if (option == FileHandling.OpenOption.WRITE) {
-          if (!record_map_.containsKey(path)) {
-            // first access
-            if (!(new File(path).exists())) {
-              // not exist
-              return new OpenReturnVal(null, FileHandling.Errors.ENOENT);
-            }
-            if (!(new File(path).isFile())) {
-              // not a regular file
-              return new OpenReturnVal(null, FileHandling.Errors.EPERM);
-            }
-            if (!(new File(path).canWrite())) {
-              // permission problem
-              return new OpenReturnVal(null, FileHandling.Errors.EPERM);
-            }
-          } else {
-            if (record_map_.get(path).GetReaderVersionId() < 0) {
-              // some writer has created this file but should not be visible now
-              return new OpenReturnVal(null, FileHandling.Errors.ENOENT);
-            }
-            if (!(new File(record_map_.get(path).GetReaderVersion().ToFileName())).canWrite()) {
-              return new OpenReturnVal(null, FileHandling.Errors.EPERM);
-            }
-          }
-        }
-        // TODO: duplicate code from above branch, try to modularize this
-        FileRecord record = record_map_.get(path);
-        if (record == null) {
-          if (new File(path).exists()) {
-            // enable write-copy from the existing reader version
-            record = new FileRecord(path, 0, 0);
-          } else {
-            record = new FileRecord(path, -1, -1);
-          }
-          record_map_.put(path, record);
-        }
-        return GetAndRegisterFile(record, path, option);
+      CheckResult check_result = checker_.Check(path);
+      boolean if_exist = check_result.exist;
+      boolean if_directory = check_result.is_directory;
+      boolean if_regular = check_result.is_regular_file;
+      boolean if_can_read = check_result.can_read;
+      boolean if_can_write = check_result.can_write;
+      // aggregate all error cases across open mode
+      if (!if_exist
+          && (option != FileHandling.OpenOption.CREATE
+              && option != FileHandling.OpenOption.CREATE_NEW)) {
+        // the requested file not found
+        return new OpenReturnVal(null, FileHandling.Errors.ENOENT, false);
       }
+      if (if_exist && option == FileHandling.OpenOption.CREATE_NEW) {
+        // cannot create new
+        return new OpenReturnVal(null, FileHandling.Errors.EEXIST, false);
+      }
+      if (if_directory) {
+        // the path actually points to a directory
+        if (option != FileHandling.OpenOption.READ) {
+          // can only apply open with read option on directory
+          return new OpenReturnVal(null, FileHandling.Errors.EISDIR, true);
+        }
+        if (!if_can_read) {
+          // no read permission with this directory
+          return new OpenReturnVal(null, FileHandling.Errors.EPERM, true);
+        }
+        // good to go, a dummy directory fd
+        return new OpenReturnVal(null, cache_fd_++, true);
+      }
+      if (!if_regular) {
+        // not a regular file
+        if (option == FileHandling.OpenOption.READ || option == FileHandling.OpenOption.WRITE) {
+          return new OpenReturnVal(null, FileHandling.Errors.EPERM, false);
+        }
+        if (if_exist && option == FileHandling.OpenOption.CREATE) {
+          return new OpenReturnVal(null, FileHandling.Errors.EPERM, false);
+        }
+      }
+      if (!if_can_read) {
+        // read permission not granted
+        if (option == FileHandling.OpenOption.READ) {
+          return new OpenReturnVal(null, FileHandling.Errors.EPERM, false);
+        }
+        if (if_exist && option == FileHandling.OpenOption.CREATE) {
+          // not creating a new one, but old one cannot be read
+          return new OpenReturnVal(null, FileHandling.Errors.EPERM, false);
+        }
+      }
+      if (!if_can_write) {
+        // write permission not granted
+        if (option == FileHandling.OpenOption.WRITE) {
+          return new OpenReturnVal(null, FileHandling.Errors.EPERM, false);
+        }
+        if (if_exist && option == FileHandling.OpenOption.CREATE) {
+          // not creating a new one, but old one cannot be written
+          return new OpenReturnVal(null, FileHandling.Errors.EPERM, false);
+        }
+      }
+
+      // create new entry in the record map if necessary
+      FileRecord record = record_map_.get(path);
+      if (record == null) {
+        int init_version = (if_exist) ? 0 : -1;
+        record = new FileRecord(path, init_version, init_version);
+        record_map_.put(path, record);
+      }
+
+      return GetAndRegisterFile(record, path, option);
+
+      //      if (option == FileHandling.OpenOption.READ) {
+      //        // existing read only
+      //        FileRecord record = record_map_.get(path);
+      //        if (record != null) {
+      //          // has a record, not necessarily valid for read
+      //          int reader_version = record.GetReaderVersionId();
+      //          if (reader_version < 0) {
+      //            // equivalent to file not found
+      //            return new OpenReturnVal(null, FileHandling.Errors.ENOENT);
+      //          } else {
+      //            // grab a shared copy of reader version
+      //            return GetAndRegisterFile(record, path, option);
+      //          }
+      //        } else {
+      //          // fresh read, check existence and create FileRecord
+      //          File f = new File(path);
+      //          if (!f.exists()) {
+      //            // file not exist
+      //            return new OpenReturnVal(null, FileHandling.Errors.ENOENT);
+      //          }
+      //          if (!f.isFile()) {
+      //          }
+      //          if (!f.canRead()) {
+      //            // permission problem
+      //            return new OpenReturnVal(null, FileHandling.Errors.EPERM);
+      //          }
+      //          // create FileRecord for it
+      //          record = new FileRecord(path, 0, 0);
+      //          record_map_.put(path, record);
+      //          return GetAndRegisterFile(record, path, option);
+      //        }
+      //      } else {
+      //        // other 3 modifying operations
+      //        if (option == FileHandling.OpenOption.CREATE_NEW) {
+      //          // possibility 1: already exists on disk and it's first access
+      //          if (!record_map_.containsKey(path) && new File(path).exists()) {
+      //            return new OpenReturnVal(null, FileHandling.Errors.EEXIST);
+      //          }
+      //          // possibility 2: other writer has created it but not close yet
+      //          if (record_map_.containsKey(path) && record_map_.get(path).GetReaderVersionId() >=
+      //          0) {
+      //            return new OpenReturnVal(null, FileHandling.Errors.EEXIST);
+      //          }
+      //        }
+      //        if (option == FileHandling.OpenOption.WRITE) {
+      //          if (!record_map_.containsKey(path)) {
+      //            // first access
+      //            if (!(new File(path).exists())) {
+      //              // not exist
+      //              return new OpenReturnVal(null, FileHandling.Errors.ENOENT);
+      //            }
+      //            if (!(new File(path).isFile())) {
+      //              // not a regular file
+      //              return new OpenReturnVal(null, FileHandling.Errors.EPERM);
+      //            }
+      //            if (!(new File(path).canWrite())) {
+      //              // permission problem
+      //              return new OpenReturnVal(null, FileHandling.Errors.EPERM);
+      //            }
+      //          } else {
+      //            if (record_map_.get(path).GetReaderVersionId() < 0) {
+      //              // some writer has created this file but should not be visible now
+      //              return new OpenReturnVal(null, FileHandling.Errors.ENOENT);
+      //            }
+      //            if (!(new
+      //            File(record_map_.get(path).GetReaderVersion().ToFileName())).canWrite()) {
+      //              return new OpenReturnVal(null, FileHandling.Errors.EPERM);
+      //            }
+      //          }
+      //        }
+      //        // TODO: duplicate code from above branch, try to modularize this
+      //        FileRecord record = record_map_.get(path);
+      //        if (record == null) {
+      //          if (new File(path).exists()) {
+      //            // enable write-copy from the existing reader version
+      //            record = new FileRecord(path, 0, 0);
+      //          } else {
+      //            record = new FileRecord(path, -1, -1);
+      //          }
+      //          record_map_.put(path, record);
+      //        }
+      //        return GetAndRegisterFile(record, path, option);
+      //      }
     } catch (FileSystemException | FileNotFoundException e) {
       // already check for filenotfound above, assume it is permission problem
       e.printStackTrace();
-      return new OpenReturnVal(null, FileHandling.Errors.EPERM);
+      return new OpenReturnVal(null, FileHandling.Errors.EPERM, false);
     } catch (IOException e) {
       // let EIO=5 be the indicator for IOException for now
       e.printStackTrace();
-      return new OpenReturnVal(null, EIO);
+      return new OpenReturnVal(null, EIO, false);
     } catch (Exception e) {
       e.printStackTrace();
     } finally {
       mtx_.unlock();
     }
     // dummy placeholder for uncaught unknown exception
-    return new OpenReturnVal(null, -1);
+    return new OpenReturnVal(null, EIO, false);
   }
 
   public int close(int fd) {
@@ -450,7 +618,7 @@ public class Cache {
     try {
       // first check if this is a directory
       File file = new File(path);
-      if (file.exists() && file.isDirectory()) {
+      if (file.isDirectory()) {
         return FileHandling.Errors.EISDIR;
       }
       // divide into cases by if the record exists for this file
