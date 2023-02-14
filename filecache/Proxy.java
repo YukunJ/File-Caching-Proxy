@@ -31,6 +31,11 @@ import java.util.HashSet;
 class Proxy {
   /* the shared Cache for local disk, exclusive critical session */
   private static final Cache cache = new Cache();
+
+  private static final String Slash = "/";
+
+  private static final String Colon = ":";
+
   private static class FileHandler implements FileHandling {
     private static final int EIO = -5;
     private final HashMap<Integer, RandomAccessFile> fd_filehandle_map_;
@@ -188,13 +193,16 @@ class Proxy {
     String server_address = args[0];
     String server_port = args[1];
     String cache_dir = args[2];
-    String server_lookup =
-        "//" + server_address + ":" + server_port + "/" + FileManagerRemote.SERVER_NAME;
+    String server_lookup = Slash + Slash + server_address + Colon + server_port + Slash
+        + FileManagerRemote.SERVER_NAME;
     Logger.Log("Proxy starts running with cache_dir=" + cache_dir
         + " and server lookup address=" + server_lookup);
     FileManagerRemote remote_manager = (FileManagerRemote) Naming.lookup(server_lookup);
     Proxy.cache.AddRemoteFileManager(remote_manager);
-    Proxy.cache.foo();
+    RandomAccessFile f = new RandomAccessFile("hello.txt", "rw");
+    byte[] data = new byte[(int) f.length()];
+    f.read(data);
+    remote_manager.Upload("subdir1/hello.txt", data);
     (new RPCreceiver(new FileHandlingFactory())).run();
   }
 }

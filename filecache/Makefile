@@ -9,7 +9,7 @@ JFLAGS = -g
 JC = javac
 
 # set necessary environment variables as well
-all: Server.class Proxy.class Cache.class FileManagerRemote.java FileChecker.java
+all: Server.class Proxy.class Cache.class Logger.java FileManagerRemote.java FileChecker.java
 
 %.class: %.java
 	$(JC) $(JFLAGS) $*.java

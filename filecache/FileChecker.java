@@ -10,15 +10,15 @@ import java.io.*;
 import java.rmi.Remote;
 import java.rmi.RemoteException;
 public interface FileChecker {
-  boolean IfExist(String path);
+  public boolean IfExist(String path);
 
-  boolean IfDirectory(String path);
+  public boolean IfDirectory(String path);
 
-  boolean IfRegularFile(String path);
+  public boolean IfRegularFile(String path);
 
-  boolean IfCanRead(String path);
+  public boolean IfCanRead(String path);
 
-  boolean IfCanWrite(String path);
+  public boolean IfCanWrite(String path);
 
-  ValidateResult Validate(String path);
+  public ValidateResult Validate(String path);
 }
