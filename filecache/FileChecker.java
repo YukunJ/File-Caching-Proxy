@@ -20,5 +20,5 @@ public interface FileChecker {
 
   public boolean IfCanWrite(String path);
 
-  public ValidateResult Validate(String path);
+  public ValidateResult Validate(String path, long timestamp);
 }

@@ -272,15 +272,16 @@ public class Cache {
     }
 
     @Override
-    public ValidateResult Validate(String path) {
-      return new ValidateResult(
-          IfExist(path), IfDirectory(path), IfRegularFile(path), IfCanRead(path), IfCanWrite(path));
+    public ValidateResult Validate(String path, long validation_timestamp) {
+      return new ValidateResult(IfExist(path), IfDirectory(path), IfRegularFile(path),
+          IfCanRead(path), IfCanWrite(path), validation_timestamp);
     }
   }
 
   /* file descriptor offset */
   private static final int INIT_FD = 1024;
   private static final int EIO = -5;
+  private static final Long CACHE_NO_EXIST = -1L;
   private FileManagerRemote remote_manager_; // to communicate with Server
   private int cache_fd_;
   private final FileChecker checker_;
@@ -371,7 +372,7 @@ public class Cache {
   public OpenReturnVal open(String path, FileHandling.OpenOption option) {
     mtx_.lock();
     try {
-      ValidateResult check_result = checker_.Validate(path);
+      ValidateResult check_result = checker_.Validate(path, 0); // hack for compiler
       boolean if_exist = check_result.exist;
       boolean if_directory = check_result.is_directory;
       boolean if_regular = check_result.is_regular_file;

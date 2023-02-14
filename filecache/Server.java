@@ -26,44 +26,68 @@ import java.util.HashMap;
 import java.util.Objects;
 import java.util.concurrent.locks.ReentrantLock;
 
-/* Server side disk manager to verify the status of a file on service dir */
-class ServerFileChecker implements FileChecker {
-  @Override
-  public boolean IfExist(String path) {
-    return false;
-  }
-
-  @Override
-  public boolean IfDirectory(String path) {
-    return false;
-  }
-
-  @Override
-  public boolean IfRegularFile(String path) {
-    return false;
-  }
-
-  @Override
-  public boolean IfCanRead(String path) {
-    return false;
-  }
-
-  @Override
-  public boolean IfCanWrite(String path) {
-    return false;
-  }
-
-  @Override
-  public ValidateResult Validate(String path) {
-    return null;
-  }
-}
-
 public class Server extends UnicastRemoteObject implements FileManagerRemote {
+  /* Server side disk manager to verify the status of a file on service dir */
+  class ServerFileChecker implements FileChecker {
+    public final Long SERVER_NO_EXIST = -2L;
+    @Override
+    public boolean IfExist(String path) {
+      return new File(path).exists();
+    }
+
+    @Override
+    public boolean IfDirectory(String path) {
+      return new File(path).isDirectory();
+    }
+
+    @Override
+    public boolean IfRegularFile(String path) {
+      return new File(path).isFile();
+    }
+
+    @Override
+    public boolean IfCanRead(String path) {
+      return new File(path).canRead();
+    }
+
+    @Override
+    public boolean IfCanWrite(String path) {
+      return new File(path).canWrite();
+    }
+
+    @Override
+    public ValidateResult Validate(String path, long timestamp) {
+      long server_file_timestamp = file_to_timestamp_map_.getOrDefault(path, SERVER_NO_EXIST);
+      ValidateResult res = new ValidateResult(IfExist(path), IfDirectory(path), IfRegularFile(path),
+          IfCanRead(path), IfCanWrite(path), server_file_timestamp);
+      if (server_file_timestamp != SERVER_NO_EXIST && timestamp != server_file_timestamp) {
+        // the server shall provide updated version to proxy
+        byte[] file_data = LoadFile(path);
+        res.CarryData(file_data);
+      }
+      return res;
+    }
+
+    /* Load a local file into an byte array, ready to be transferred over RMI */
+    public byte[] LoadFile(String path) {
+      assert (new File(path).exists());
+      try {
+        RandomAccessFile f = new RandomAccessFile(path, READER_MODE);
+        byte[] data = new byte[(int) f.length()];
+        f.read(data);
+        return data;
+      } catch (Exception e) {
+        e.printStackTrace();
+      }
+      return null;
+    }
+  }
+
   private final ReentrantLock mtx_;
   private final HashMap<String, Long> file_to_timestamp_map_;
   private long timestamp_ = 0;
-
+  public final String READER_MODE = "r";
+  public final String WRITER_MODE = "rw";
   private static final String Slash = "/";
 
   private final String root_dir_;
@@ -85,8 +109,16 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
   }
 
   @Override
-  public ValidateResult Validate(String path, long validation_version) throws RemoteException {
-    return null;
+  public ValidateResult Validate(String path, long validation_timestamp) throws RemoteException {
+    path = FormatPath(path);
+    Logger.Log(
+        "Validate Request of path=" + path + " with proxy timestamp=" + validation_timestamp);
+    mtx_.lock();
+    try {
+      return checker_.Validate(path, validation_timestamp);
+    } finally {
+      mtx_.unlock();
+    }
   }
 
   /**
@@ -94,11 +126,11 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
    */
   @Override
   public long Upload(String path, byte[] data) throws RemoteException, IOException {
-    path = Paths.get(root_dir_ + Slash + path).normalize().toString();
+    path = FormatPath(path);
     Logger.Log("Upload Request of path=" + path + " payload=" + data.length);
     mtx_.lock();
     try {
-      RandomAccessFile file = new RandomAccessFile(path, "rw");
+      RandomAccessFile file = new RandomAccessFile(path, WRITER_MODE);
       // clear the content of the file if existing
       file.setLength(0);
       file.write(data);
@@ -115,9 +147,9 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
    */
   @Override
   public int Delete(String path) throws RemoteException {
-    path = Paths.get(root_dir_ + Slash + path).normalize().toString();
+    path = FormatPath(path);
     Logger.Log("Delete Request of path=" + path);
-     mtx_.lock();
+    mtx_.lock();
     try {
       File f = new File(path);
       if (!checker_.IfExist(path)) {
@@ -146,13 +178,24 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
   private void InitScanVersion() {
     // make sure the service directory exist
     assert (new File(root_dir_).isDirectory());
-    File root = new File(root_dir_);
-    ScanVersionHelper(root.getName() + Slash, root);
-    // Logging purpose
-    Logger.Log("Server root_dir initial timestamp versioning:");
-    for (String filename : file_to_timestamp_map_.keySet()) {
-      Logger.Log(filename + " : " + file_to_timestamp_map_.get(filename));
+    mtx_.lock();
+    try {
+      File root = new File(root_dir_);
+      ScanVersionHelper(root.getName() + Slash, root);
+      // Logging purpose
+      Logger.Log("Server root_dir initial timestamp versioning:");
+      for (String filename : file_to_timestamp_map_.keySet()) {
+        Logger.Log(filename + " : " + file_to_timestamp_map_.get(filename));
+      }
+    } finally {
+      mtx_.unlock();
     }
+  }
+
+  /* format a proxy-side file address to the server-side file address
+   */
+  private String FormatPath(String path) {
+    return Paths.get(root_dir_ + Slash + path).normalize().toString();
   }
 
   private void ScanVersionHelper(String previous_path, File directory) {
@@ -179,11 +222,7 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
     }
 
     // create our Server instance (first runs on a random port)
-    String normalized = Paths.get("server_root/../another_dir").normalize().toString();
-    System.out.println("To=" + normalized);
-    System.out.println("Absolute=" + new File(normalized).getAbsolutePath());
     Server server = new Server(root_dir);
-
     // add reference to registry so clients can find it using name FileServer
     String address = "//127.0.0.1:" + args[0] + Slash + FileManagerRemote.SERVER_NAME;
     Naming.rebind(address, server);
