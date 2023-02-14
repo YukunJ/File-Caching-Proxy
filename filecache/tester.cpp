@@ -9,8 +9,38 @@
 const char* msgs[5] = {"Hello from writer 0\n", "Hello from writer 1\n",
                        "Hello from writer 2\n", "Hello from writer 3\n",
                        "Hello from writer 4\n"};
-
+void check(void) {
+  if (errno != 0) {
+    printf("errno != 0\n");
+    exit(1);
+  }
+  errno = 0;
+}
 int main(int argc, char* argv[]) {
+  // T1
+  errno = 0;
+  int p1_f = open("F.txt", O_RDWR);
+  check();
+  int p1_g = open("G.txt", O_RDWR);
+  check();
+  int p2_g = open("G.txt", O_RDWR);
+  check();
+  write(p1_g, "hello", 5);
+  check();
+  close(p1_g);
+  check();
+  write(p1_f, "15440/640", 9);
+  check();
+  close(p2_g);
+  check();
+  p2_g = open("G.txt", O_RDWR);
+  check();
+  p1_g = open("G.txt", O_RDWR);
+  check();
+  write(p2_g, "hello world", 11);
+  close(p2_g);
+  close(p1_g);
+  exit(1);
   //  errno = 0;
   //  int me = open(argv[1], O_WRONLY);
   //  printf("me open fd=%d errno=%d\n", me, errno);

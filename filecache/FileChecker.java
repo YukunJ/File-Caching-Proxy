@@ -6,6 +6,9 @@
  * This is Interface supported to implement the "check-on-use" semantics
  * between server and proxy
  * */
+import java.io.*;
+import java.rmi.Remote;
+import java.rmi.RemoteException;
 public interface FileChecker {
   boolean IfExist(String path);
 
@@ -17,5 +20,5 @@ public interface FileChecker {
 
   boolean IfCanWrite(String path);
 
-  CheckResult Check(String path);
+  ValidateResult Validate(String path);
 }

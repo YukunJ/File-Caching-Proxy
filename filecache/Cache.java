@@ -22,6 +22,8 @@ import java.io.RandomAccessFile;
 import java.nio.file.FileSystemException;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
+import java.rmi.RemoteException;
+import java.rmi.server.ServerNotActiveException;
 import java.util.HashMap;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -67,7 +69,7 @@ class Logger {
     return "Unknown";
   }
 
-  public static String CheckResultToString(CheckResult result) {
+  public static String ValidateResultToString(ValidateResult result) {
     return "If exist: " + result.exist + "\nIf directory: " + result.is_directory
         + "\nIf regular: " + result.is_regular_file + "\nIf can read: " + result.can_read
         + "\nIf can write: " + result.can_write;
@@ -96,24 +98,6 @@ class FileReturnVal {
   public FileReturnVal(RandomAccessFile handle, int version) {
     file_handle_ = handle;
     version_ = version;
-  }
-}
-
-/* the aggregated info when check-on-use with server */
-class CheckResult {
-  boolean exist;
-  boolean is_directory;
-  boolean is_regular_file;
-  boolean can_read;
-  boolean can_write;
-
-  public CheckResult(boolean exist, boolean is_directory, boolean is_regular_file, boolean can_read,
-      boolean can_write) {
-    this.exist = exist;
-    this.is_directory = is_directory;
-    this.is_regular_file = is_regular_file;
-    this.can_read = can_read;
-    this.can_write = can_write;
   }
 }
 
@@ -337,8 +321,8 @@ public class Cache {
     }
 
     @Override
-    public CheckResult Check(String path) {
-      return new CheckResult(
+    public ValidateResult Validate(String path) {
+      return new ValidateResult(
           IfExist(path), IfDirectory(path), IfRegularFile(path), IfCanRead(path), IfCanWrite(path));
     }
   }
@@ -346,6 +330,7 @@ public class Cache {
   /* file descriptor offset */
   private static final int INIT_FD = 1024;
   private static final int EIO = -5;
+  private FileManagerRemote remote_manager_; // to communicate with Server
   private int cache_fd_;
   private final FileChecker checker_;
   private final HashMap<String, FileRecord> record_map_;
@@ -369,6 +354,14 @@ public class Cache {
     mtx_ = new ReentrantLock();
   }
 
+  public void foo() throws RemoteException, ServerNotActiveException {
+    System.out.println("Server says: " + remote_manager_.EchoIntBack(123));
+  }
+
+  /* add the handler to enable communicating with Server */
+  public void AddRemoteFileManager(FileManagerRemote remote_manager) {
+    this.remote_manager_ = remote_manager;
+  }
   /* do book-keeping after a successful open */
   public int Register(
       String filename, RandomAccessFile file_handle, int version, FileHandling.OpenOption option) {
@@ -427,7 +420,7 @@ public class Cache {
   public OpenReturnVal open(String path, FileHandling.OpenOption option) {
     mtx_.lock();
     try {
-      CheckResult check_result = checker_.Check(path);
+      ValidateResult check_result = checker_.Validate(path);
       boolean if_exist = check_result.exist;
       boolean if_directory = check_result.is_directory;
       boolean if_regular = check_result.is_regular_file;
@@ -561,9 +554,5 @@ public class Cache {
       mtx_.unlock();
     }
     return EIO; // indicate any other form of error
-  }
-
-  public static void main(String[] args) {
-    System.out.println("Init Cache");
   }
 }

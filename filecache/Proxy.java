@@ -12,6 +12,9 @@
 
 import java.io.*;
 import java.nio.file.Paths;
+import java.rmi.Naming;
+import java.rmi.NotBoundException;
+import java.rmi.server.ServerNotActiveException;
 import java.util.HashMap;
 import java.util.HashSet;
 
@@ -178,9 +181,20 @@ class Proxy {
     }
   }
 
-  public static void main(String[] args) throws IOException {
+  public static void main(String[] args)
+      throws IOException, NotBoundException, ServerNotActiveException {
     System.out.printf("Proxy Starts with port=%s and pin=%s\n", System.getenv("proxyport15440"),
         System.getenv("pin15440"));
+    String server_address = args[0];
+    String server_port = args[1];
+    String cache_dir = args[2];
+    String server_lookup =
+        "//" + server_address + ":" + server_port + "/" + FileManagerRemote.SERVER_NAME;
+    Logger.Log("Proxy starts running with cache_dir=" + cache_dir
+        + " and server lookup address=" + server_lookup);
+    FileManagerRemote remote_manager = (FileManagerRemote) Naming.lookup(server_lookup);
+    Proxy.cache.AddRemoteFileManager(remote_manager);
+    Proxy.cache.foo();
     (new RPCreceiver(new FileHandlingFactory())).run();
   }
 }

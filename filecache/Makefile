@@ -9,7 +9,7 @@ JFLAGS = -g
 JC = javac
 
 # set necessary environment variables as well
-all: Proxy.class Cache.class FileChecker.java
+all: Server.class Proxy.class Cache.class FileManagerRemote.java FileChecker.java
 
 %.class: %.java
 	$(JC) $(JFLAGS) $*.java
@@ -24,7 +24,7 @@ format:
 .PHONY: submit
 submit:
 	# submit by compressing tar
-	tar cvzf ../mysolution.tgz Makefile Proxy.java Cache.java FileChecker.java
+	tar cvzf ../mysolution.tgz Makefile Server.java Proxy.java Cache.java FileChecker.java FileManagerRemote.java
 
 # clean up command
 .PHONY: clean
