@@ -181,7 +181,7 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
     mtx_.lock();
     try {
       File root = new File(root_dir_);
-      ScanVersionHelper(root.getName() + Slash, root);
+      ScanVersionHelper(((root.getName().equals(".")) ? "" : root.getName() + Slash), root);
       // Logging purpose
       Logger.Log("Server root_dir initial timestamp versioning:");
       for (String filename : file_to_timestamp_map_.keySet()) {
@@ -195,7 +195,9 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
   /* format a proxy-side file address to the server-side file address
    */
   private String FormatPath(String path) {
-    return Paths.get(root_dir_ + Slash + path).normalize().toString();
+    return Paths.get((root_dir_.equals(".") ? "" : root_dir_ + Slash) + path)
+        .normalize()
+        .toString();
   }
 
   private void ScanVersionHelper(String previous_path, File directory) {

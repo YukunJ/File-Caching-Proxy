@@ -6,6 +6,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <iostream>
+
 const char* msgs[5] = {"Hello from writer 0\n", "Hello from writer 1\n",
                        "Hello from writer 2\n", "Hello from writer 3\n",
                        "Hello from writer 4\n"};
@@ -26,11 +28,16 @@ ssize_t full_read(int fd, char* buf) {
   return reads;
 }
 
+void wait_prompt(char* next_command) {
+  printf("Press Enter to continue. Next command is: %s\n", next_command);
+  std::cin.ignore();
+}
+
 /**
     Test1:
     @assume server side has 1mb.txt
     proxy client reads twice, first should from server fetch, second should from
-   cache
+    cache
 */
 void test_1() {
   errno = 0;
@@ -122,11 +129,137 @@ void test_4() {
   close(read_fd);
 }
 
+/**
+    Test5:
+    @assume server side have base version file of "base.txt"
+    proxy client should be able to see session-semantics with server
+ */
+void test_5() {
+  errno = 0;
+  char buf[1024 * 1024 + 1] = {0};
+  // open base.txt should download base.txt from server
+  int read_fd = open("base.txt", O_RDONLY);
+  check();
+
+  int write_fd = open("base.txt", O_RDWR);
+  check();
+  lseek(write_fd, 0, SEEK_END);
+  const char* append_msg = "from writer 1\n";
+  ssize_t writes = write(write_fd, append_msg, strlen(append_msg));
+  check();
+  printf("Writer1 appends %ld bytes into file\n", writes);
+
+  int write_fd2 = open("base.txt", O_RDWR);
+  check();
+  lseek(write_fd2, 0, SEEK_END);
+  const char* append_msg2 = "from writer 2\n";
+  writes = write(write_fd2, append_msg2, strlen(append_msg2));
+  check();
+  printf("Writer2 appends %ld bytes into file\n", writes);
+
+  close(write_fd2);
+  close(write_fd);
+
+  // should not read the append content
+  ssize_t reads = full_read(read_fd, buf);
+  check();
+  printf("Old Reader reads %ld bytes of content=%s\n", reads, buf);
+  close(read_fd);
+  memset(buf, 0, sizeof(buf));
+
+  // new read should read content from write_fd, since write_fd2 should be
+  // overwritten
+  read_fd = open("base.txt", O_RDONLY);
+  check();
+  reads = full_read(read_fd, buf);
+  check();
+  printf("New Reader reads %ld bytes of content=%s\n", reads, buf);
+  close(read_fd);
+}
+
+/**
+    Test: Concurrent Proxy interaction
+    @assume none
+    launch two clients connected with two different proxy
+
+ */
+void test_concurrent_proxy(int id) {
+  printf("Welcome. I am client %d\n", id);
+
+  char buf[1024 * 1024 + 1] = {0};
+
+  wait_prompt("open(\"concurrent.txt\", O_RDWR)");
+  int read_fd = open("concurrent.txt", O_RDWR);
+  check();
+
+  wait_prompt("full_read(read_fd, buf)");
+  ssize_t reads = full_read(read_fd, buf);
+  printf("client %d reads content=%s\n", id, buf);
+
+  wait_prompt("close(read_fd)");
+  close(read_fd);
+
+  wait_prompt("open(\"concurrent.txt\", O_RDWR)");
+  int write_fd = open("concurrent.txt", O_RDWR);
+  check();
+
+  memset(buf, 0, sizeof(buf));
+  sprintf(buf, "client %d writes dominate\n", id);
+
+  wait_prompt("write(write_fd, buf, strlen(buf))");
+  ssize_t writes = write(write_fd, buf, strlen(buf));
+
+  wait_prompt("close(write_fd)");
+  close(write_fd);
+
+  wait_prompt("open(\"concurrent.txt\", O_RDWR)");
+  read_fd = open("concurrent.txt", O_RDWR);
+  check();
+
+  wait_prompt("full_read(read_fd, buf)");
+  reads = full_read(read_fd, buf);
+  printf("client %d reads content=%s\n", id, buf);
+
+  exit(0);
+}
+
 int main(int argc, char* argv[]) {
-  test_4();
+  char buf[100] = {0};
+  errno = 0;
+  int fd1 = open(argv[1], O_RDONLY);
+  check();
+  int fd2 = open(argv[1], O_RDONLY);
+  check();
+  int fd3 = open(argv[1], O_RDONLY);
+  check();
+  int fd4 = open(argv[1], O_RDONLY);
+  check();
+  ssize_t readed;
+  memset(buf, 0, sizeof(buf));
+  readed = full_read(fd1, buf);
+  printf("read content=%s\n", buf);
+
+  memset(buf, 0, sizeof(buf));
+  readed = full_read(fd2, buf);
+  printf("read content=%s\n", buf);
+
+  memset(buf, 0, sizeof(buf));
+  readed = full_read(fd3, buf);
+  printf("read content=%s\n", buf);
+
+  memset(buf, 0, sizeof(buf));
+  readed = full_read(fd4, buf);
+  printf("read content=%s\n", buf);
+
+  close(fd1);
+  close(fd2);
+  close(fd3);
+  close(fd4);
+  exit(0);
+  //  int id = atoi(argv[1]);
+  //  test_concurrent_proxy(id);
   exit(0);
   errno = 0;
-  char buf[100] = {0};
 
   int fd_1 = open(argv[1], O_RDONLY);
   if (fd_1 == -1) {
