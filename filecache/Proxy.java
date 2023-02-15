@@ -198,11 +198,8 @@ class Proxy {
     Logger.Log("Proxy starts running with cache_dir=" + cache_dir
         + " and server lookup address=" + server_lookup);
     FileManagerRemote remote_manager = (FileManagerRemote) Naming.lookup(server_lookup);
+    Proxy.cache.SetCacheDirectory(cache_dir);
     Proxy.cache.AddRemoteFileManager(remote_manager);
-    RandomAccessFile f = new RandomAccessFile("hello.txt", "rw");
-    byte[] data = new byte[(int) f.length()];
-    f.read(data);
-    remote_manager.Upload("subdir1/hello.txt", data);
     (new RPCreceiver(new FileHandlingFactory())).run();
   }
 }

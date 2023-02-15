@@ -16,51 +16,115 @@ void check(void) {
   }
   errno = 0;
 }
-int main(int argc, char* argv[]) {
-  // T1
-  errno = 0;
-  int p1_f = open("F.txt", O_RDWR);
-  check();
-  int p1_g = open("G.txt", O_RDWR);
-  check();
-  int p2_g = open("G.txt", O_RDWR);
-  check();
-  write(p1_g, "hello", 5);
-  check();
-  close(p1_g);
-  check();
-  write(p1_f, "15440/640", 9);
-  check();
-  close(p2_g);
-  check();
-  p2_g = open("G.txt", O_RDWR);
-  check();
-  p1_g = open("G.txt", O_RDWR);
-  check();
-  write(p2_g, "hello world", 11);
-  close(p2_g);
-  close(p1_g);
-  exit(1);
-  //  errno = 0;
-  //  int me = open(argv[1], O_WRONLY);
-  //  printf("me open fd=%d errno=%d\n", me, errno);
-  //  errno = 0;
-  //  int res = unlink(argv[1]);
-  //  printf("unlink=%d errno=%d\n", res, errno);
-  //  errno = 0;
-  //  write(me, "hello from me", strlen("hello from me"));
-  //  int han = open(argv[1], O_RDONLY);
-  //  printf("han open fd=%d errno=%d\n", han, errno);
-  //  errno = 0;
-  //  close(me);
-  //  int leo = open(argv[1], O_RDONLY);
-  //  printf("leo open fd=%d errno=%d\n", leo, errno);
-  //  char buf[100] = {0};
-  //  ssize_t reads = read(leo, buf, 100);
-  //  printf("leo reads=%d content=%s\n", reads, buf);
-  //  close(leo);
-  //  exit(0);
 
+ssize_t full_read(int fd, char* buf) {
+  ssize_t reads = 0;
+  ssize_t this_read;
+  while ((this_read = read(fd, buf + reads, 1024)) > 0) {
+    reads += this_read;
+  }
+  return reads;
+}
+
+/**
+    Test1:
+    @assume server side has 1mb.txt
+    proxy client reads twice, first should from server fetch, second should from
+   cache
+*/
+void test_1() {
+  errno = 0;
+  char buf[1024 * 1024 + 1] = {0};
+  int read_fd1 = open("1mb.txt", O_RDONLY);
+  check();
+  ssize_t reads = full_read(read_fd1, buf);
+  check();
+  printf("1st reads = %ld bytes\n", reads);
+  close(read_fd1);
+
+  // should from cache directly
+  memset(buf, 0, sizeof(buf));
+  int read_fd2 = open("1mb.txt", O_RDONLY);
+  check();
+  reads = full_read(read_fd2, buf);
+  check();
+  printf("2nd reads = %ld bytes\n", reads);
+  close(read_fd2);
+}
+
+/**
+    Test2:
+    @assume none
+    proxy client creates and write new file on server
+    read it back and add something to it.
+*/
+void test_2() {
+  errno = 0;
+  char buf[1024 * 1024 + 1] = {0};
+  const char* msg = "hello from client";
+  int write_fd = open("hello.txt", O_WRONLY | O_CREAT, S_IRWXU);
+  check();
+  write(write_fd, msg, strlen(msg));
+  check();
+  close(write_fd);
+
+  // should read back 'hello from client'
+  int fd = open("hello.txt", O_RDWR);
+  check();
+  ssize_t reads = full_read(fd, buf);
+  printf("read back content=%s\n", buf);
+  memset(buf, 0, sizeof(buf));
+
+  // append a sentence to the end of that file
+  const char* msg_ = "\nhello again";
+  lseek(fd, 0, SEEK_END);
+  check();
+  write(fd, msg_, strlen(msg_));
+  check();
+  close(fd);
+
+  // read the just-written content back
+  fd = open("hello.txt", O_RDONLY);
+  check();
+  reads = full_read(fd, buf);
+  printf("after append, read back content=%s\n", buf);
+  close(fd);
+}
+
+/**
+    Test3:
+    @assume server side does not have 'no.txt', does have 'yes.txt'
+    proxy client want to read an non-existing or create existing should all fail
+*/
+void test_3() {
+  errno = 0;
+  int read_fd = open("no.txt", O_RDONLY);
+  printf("open non-existing no.txt should fail. fd=%d errno=%d\n", read_fd,
+         errno);
+  errno = 0;
+
+  int write_fd = open("yes.txt", O_RDWR | O_CREAT | O_EXCL, S_IRWXU);
+  printf("open-create existing yes.txt should fail. fd=%d errno=%d\n", write_fd,
+         errno);
+  close(read_fd);
+  close(write_fd);
+}
+
+/**
+    Test4:
+    @assume server side have 'subdir' directory
+    proxy client should be able to open existing directory
+*/
+void test_4() {
+  errno = 0;
+  int read_fd = open("subdir", O_RDONLY);
+  check();
+  close(read_fd);
+}
+
+int main(int argc, char* argv[]) {
+  test_4();
+  exit(0);
   errno = 0;
   char buf[100] = {0};
 

@@ -21,6 +21,7 @@ import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.nio.file.FileSystemException;
 import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.rmi.RemoteException;
 import java.rmi.server.ServerNotActiveException;
@@ -51,43 +52,42 @@ class FileReturnVal {
     version_ = version;
   }
 }
+/**
+ * The version info about a file
+ * one file might have different versions at the same time due to concurrency
+ */
+class Version {
+  public final int version_;
+  public final String filename_;
+  private int ref_count_;
 
-class FileRecord {
-  /**
-   * The version info about a file
-   * one file might have different versions at the same time due to concurrency
-   */
-  class Version {
-    private final int version_;
-    private final String filename_;
-    private int ref_count_;
-
-    public Version(String filename, int version) {
-      filename_ = filename;
-      version_ = version;
-      ref_count_ = 0;
-    }
-
-    public int GetRefCount() {
-      return ref_count_;
-    }
-
-    public int PlusRefCount() {
-      return ++ref_count_;
-    }
-
-    public int MinusRefCount() {
-      return --ref_count_;
-    }
-
-    public String ToFileName() {
-      return filename_ + ((version_ == 0) ? "" : Integer.toString(version_));
-    }
+  public Version(String filename, int version) {
+    filename_ = filename;
+    version_ = version;
+    ref_count_ = 0;
   }
 
+  public int GetRefCount() {
+    return ref_count_;
+  }
+
+  public int PlusRefCount() {
+    return ++ref_count_;
+  }
+
+  public int MinusRefCount() {
+    return --ref_count_;
+  }
+
+  public String ToFileName() {
+    return filename_ + ((version_ == 0) ? "" : Integer.toString(version_));
+  }
+}
+
+class FileRecord {
   private final String filename_;
 
-  private final HashMap<Integer, Version> version_map_;
+  public final HashMap<Integer, Version> version_map_;
 
   /* the latest reader-visible version, if -1 means no one can see this file now */
   private int reader_version_;
@@ -114,12 +114,13 @@ class FileRecord {
    */
   public FileReturnVal GetReaderFile() throws Exception {
     assert (reader_version_ >= 0);
-    final String reader_mode = "r";
     int reader_version_id = GetReaderVersionId();
     Version reader_version = GetReaderVersion();
     String reader_filename = reader_version.ToFileName();
-    RandomAccessFile file_handle = new RandomAccessFile(reader_filename, reader_mode);
-    Logger.Log("GerReaderFile for " + filename_ + " with reader_version=" + reader_version_id);
+    String cache_reader_filepath = Cache.FormatPath(reader_filename);
+    RandomAccessFile file_handle = new RandomAccessFile(cache_reader_filepath, Cache.READER_MODE);
+    Logger.Log("GerReaderFile for cache_path=" + cache_reader_filepath
+        + " with reader_version=" + reader_version_id);
     reader_version.PlusRefCount();
     return new FileReturnVal(file_handle, reader_version_id);
   }
@@ -130,19 +131,21 @@ class FileRecord {
    * otherwise create an empty file to start work with
    */
   public FileReturnVal GetWriterFile() throws Exception {
-    final String writer_mode = "rw";
     int writer_version_id = IncrementLatestVersionId();
     Version writer_version = new Version(filename_, writer_version_id);
     String writer_filename = writer_version.ToFileName();
-    Logger.Log(
-        "GetWriteFile() for " + filename_ + " with writer_version=" + writer_version.version_);
+    String cache_writer_filepath = Cache.FormatPath(writer_filename);
+    Logger.Log("GetWriteFile() for cache_path=" + cache_writer_filepath
+        + " with writer_version=" + writer_version.version_);
     if (GetReaderVersionId() >= 0) {
       // there is existing version, copy it
       String reader_filename = GetReaderVersion().ToFileName();
-      CopyFile(writer_filename, reader_filename);
-      Logger.Log("Make a copy from " + reader_filename + " to " + writer_filename);
+      String cache_reader_filepath = Cache.FormatPath(reader_filename);
+      CopyFile(cache_writer_filepath, cache_reader_filepath);
+      Logger.Log(
+          "Make a cache copy from " + cache_reader_filepath + " to " + cache_writer_filepath);
     }
-    RandomAccessFile file_handle = new RandomAccessFile(writer_filename, writer_mode);
+    RandomAccessFile file_handle = new RandomAccessFile(cache_writer_filepath, Cache.WRITER_MODE);
     version_map_.put(writer_version_id, writer_version); // must be an exclusive version
     writer_version.PlusRefCount();
     return new FileReturnVal(file_handle, writer_version_id);
@@ -168,12 +171,29 @@ class FileRecord {
    */
   public void CloseWriterFile(int version_id) {
     Version writer_version = version_map_.get(version_id);
-    // must be 0 now
-    assert (writer_version.MinusRefCount() == 0);
-    // install to be available new reader version
-    int install_version_id = writer_version.version_;
-    SetReaderVersionId(install_version_id);
-    // should not remove this version from map, future reader need it
+    byte[] data;
+    try {
+      RandomAccessFile file =
+          new RandomAccessFile(Cache.FormatPath(writer_version.ToFileName()), Cache.READER_MODE);
+      data = new byte[(int) file.length()];
+      file.read(data);
+      file.close();
+
+      // must be 0 now
+      assert (writer_version.MinusRefCount() == 0);
+      // install to be available new reader version
+      int install_version_id = writer_version.version_;
+      SetReaderVersionId(install_version_id);
+      // should not remove this version from map, future reader need it
+
+      // upload new version to server and record the timestamp
+      String origin_filename = writer_version.filename_;
+      Long server_timestamp = Cache.remote_manager_.Upload(origin_filename, data);
+      Cache.UpdateTimestamp(origin_filename, server_timestamp);
+
+    } catch (Exception e) {
+      e.printStackTrace();
+    }
   }
 
   public int IncrementLatestVersionId() {
@@ -222,69 +242,16 @@ class FileRecord {
 }
 
 public class Cache {
-  /* Checkpoint 1 version of FileChecker, will be moved to server side in ckpt 2 & 3 */
-  class CacheFileChecker implements FileChecker {
-    @Override
-    public boolean IfExist(String path) {
-      FileRecord record = record_map_.get(path);
-      if (record == null) {
-        // check on local disk
-        return new File(path).exists();
-      } else {
-        // -1 reader version indicates currently invisible
-        return record.GetReaderVersionId() >= 0;
-      }
-    }
-
-    @Override
-    public boolean IfDirectory(String path) {
-      return new File(path).isDirectory();
-    }
-
-    @Override
-    public boolean IfRegularFile(String path) {
-      FileRecord record = record_map_.get(path);
-      if (record != null && record.GetReaderVersionId() >= 0) {
-        return new File(record.GetReaderVersion().ToFileName()).isFile();
-      } else {
-        return new File(path).isFile();
-      }
-    }
-
-    @Override
-    public boolean IfCanRead(String path) {
-      FileRecord record = record_map_.get(path);
-      if (record != null && record.GetReaderVersionId() >= 0) {
-        return new File(record.GetReaderVersion().ToFileName()).canRead();
-      } else {
-        return new File(path).canRead();
-      }
-    }
-
-    @Override
-    public boolean IfCanWrite(String path) {
-      FileRecord record = record_map_.get(path);
-      if (record != null && record.GetReaderVersionId() >= 0) {
-        return new File(record.GetReaderVersion().ToFileName()).canWrite();
-      } else {
-        return new File(path).canWrite();
-      }
-    }
-
-    @Override
-    public ValidateResult Validate(String path, long validation_timestamp) {
-      return new ValidateResult(IfExist(path), IfDirectory(path), IfRegularFile(path),
-          IfCanRead(path), IfCanWrite(path), validation_timestamp);
-    }
-  }
-
   /* file descriptor offset */
   private static final int INIT_FD = 1024;
   private static final int EIO = -5;
   private static final Long CACHE_NO_EXIST = -1L;
-  private FileManagerRemote remote_manager_; // to communicate with Server
+  public static final String READER_MODE = "r";
+  public static final String WRITER_MODE = "rw";
+  private static final String Slash = "/";
+  public static FileManagerRemote remote_manager_; // to communicate with Server
+  private static final HashMap<String, Long> timestamp_map_ = new HashMap<>();
   private int cache_fd_;
-  private final FileChecker checker_;
   private final HashMap<String, FileRecord> record_map_;
   private final HashMap<Integer, RandomAccessFile> fd_handle_map_;
   private final HashMap<Integer, String> fd_filename_map_;
@@ -295,9 +262,10 @@ public class Cache {
 
   private final ReentrantLock mtx_;
 
+  private static String cache_dir_;
+
   public Cache() {
     cache_fd_ = INIT_FD;
-    checker_ = new CacheFileChecker();
     record_map_ = new HashMap<>();
     fd_handle_map_ = new HashMap<>();
     fd_filename_map_ = new HashMap<>();
@@ -306,14 +274,24 @@ public class Cache {
     mtx_ = new ReentrantLock();
   }
 
+  public static void UpdateTimestamp(String path, Long timestamp) {
+    timestamp_map_.put(path, timestamp);
+  }
+
   public void foo() throws RemoteException, ServerNotActiveException {
     System.out.println("Server says: " + remote_manager_.EchoIntBack(123));
+  }
+
+  /* set the cache root directory for disk storage */
+  public void SetCacheDirectory(String cache_dir) {
+    cache_dir_ = cache_dir;
   }
 
   /* add the handler to enable communicating with Server */
   public void AddRemoteFileManager(FileManagerRemote remote_manager) {
     this.remote_manager_ = remote_manager;
   }
+
   /* do book-keeping after a successful open */
   public int Register(
       String filename, RandomAccessFile file_handle, int version, FileHandling.OpenOption option) {
@@ -364,6 +342,39 @@ public class Cache {
     fd_filename_map_.remove(fd);
   }
 
+  /* map the logical file path to the cache root directory file path */
+  public static String FormatPath(String path) {
+    return Paths.get(cache_dir_ + Slash + path).normalize().toString();
+  }
+
+  /* save a file transferred from server into local cache directory */
+  private void SaveData(String path, byte[] data, Long server_timestamp) {
+    try {
+      FileRecord record = record_map_.get(path);
+      if (record == null) {
+        record = new FileRecord(path, -1, -1);
+        record_map_.put(path, record);
+      }
+      int version_id = record.IncrementLatestVersionId();
+      Version version = new Version(path, version_id);
+      record.version_map_.put(version_id, version);
+
+      String cache_path = FormatPath(version.ToFileName());
+      assert (cache_path.startsWith(cache_dir_) && data != null);
+      Logger.Log(
+          "SaveData for cache_path=" + cache_path + " of size=" + data.length + " from server");
+      RandomAccessFile file = new RandomAccessFile(cache_path, WRITER_MODE);
+      file.setLength(0); // clear off content
+      file.write(data);
+      file.close();
+      UpdateTimestamp(path, server_timestamp); // save the server timestamp for original path
+
+      record.SetReaderVersionId(version_id); // make this version available to clients
+    } catch (Exception e) {
+      e.printStackTrace();
+    }
+  }
+
   /**
    * Proxy delegate the open functionality to cache
    * and cache make local disk operations based on check-on-use results from the server
@@ -372,12 +383,29 @@ public class Cache {
   public OpenReturnVal open(String path, FileHandling.OpenOption option) {
     mtx_.lock();
     try {
-      ValidateResult check_result = checker_.Validate(path, 0); // hack for compiler
-      boolean if_exist = check_result.exist;
-      boolean if_directory = check_result.is_directory;
-      boolean if_regular = check_result.is_regular_file;
-      boolean if_can_read = check_result.can_read;
-      boolean if_can_write = check_result.can_write;
+      long cache_file_timestamp = timestamp_map_.getOrDefault(path, CACHE_NO_EXIST);
+      /* send validation request to server */
+      ValidateResult validate_result = remote_manager_.Validate(path, cache_file_timestamp);
+      boolean if_exist = validate_result.exist;
+      boolean if_directory = validate_result.is_directory;
+      boolean if_regular = validate_result.is_regular_file;
+      boolean if_can_read = validate_result.can_read;
+      boolean if_can_write = validate_result.can_write;
+      long server_file_timestamp = validate_result.timestamp;
+      byte[] file_data = validate_result.data;
+      if (cache_file_timestamp != server_file_timestamp && server_file_timestamp >= 0
+          && file_data != null) {
+        // new content is updated from the server side, save it
+        SaveData(path, file_data, server_file_timestamp);
+      }
+      if (!if_exist) {
+        // currently no available version
+        FileRecord record = record_map_.get(path);
+        if (record != null) {
+          record.SetReaderVersionId(-1);
+          timestamp_map_.remove(path);
+        }
+      }
       // aggregate all error cases across open mode
       if (!if_exist
           && (option != FileHandling.OpenOption.CREATE
@@ -435,7 +463,7 @@ public class Cache {
       // create new entry in the record map if necessary
       FileRecord record = record_map_.get(path);
       if (record == null) {
-        int init_version = (if_exist) ? 0 : -1;
+        int init_version = -1;
         record = new FileRecord(path, init_version, init_version);
         record_map_.put(path, record);
       }
@@ -465,7 +493,7 @@ public class Cache {
       if (!fd_handle_map_.containsKey(fd)) {
         return FileHandling.Errors.EBADF;
       }
-      DeregisterFile(fd);
+      DeregisterFile(fd); // include upload file to server
       return 0;
     } catch (Exception e) {
       e.printStackTrace();
@@ -478,25 +506,16 @@ public class Cache {
   public int unlink(String path) {
     mtx_.lock();
     try {
-      // first check if this is a directory
-      File file = new File(path);
-      if (file.isDirectory()) {
-        return FileHandling.Errors.EISDIR;
-      }
-      // divide into cases by if the record exists for this file
-      FileRecord record = record_map_.get(path);
-      if (record != null) {
-        // so readers will not be able to see it, until any writer returns
-        record.SetReaderVersionId(-1);
-        return 0;
-        // TODO: in cpkt2&3 actually need to delete the file, need some kind of reference counting
-      } else {
-        if (!file.exists()) {
-          return FileHandling.Errors.ENOENT;
+      int code = remote_manager_.Delete(path);
+      if (code == 0) {
+        // delete on server side is successful
+        FileRecord record = record_map_.get(path);
+        if (record != null) {
+          record.SetReaderVersionId(-1);
+          timestamp_map_.remove(path);
         }
-        boolean res = file.delete();
-        return 0;
       }
+      return code;
     } catch (SecurityException e) {
       e.printStackTrace();
       return FileHandling.Errors.EPERM;

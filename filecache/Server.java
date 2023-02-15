@@ -112,7 +112,7 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
   public ValidateResult Validate(String path, long validation_timestamp) throws RemoteException {
     path = FormatPath(path);
     Logger.Log(
-        "Validate Request of path=" + path + " with proxy timestamp=" + validation_timestamp);
+        "Validate Request of path=" + path + " with proxy-side timestamp=" + validation_timestamp);
     mtx_.lock();
     try {
       return checker_.Validate(path, validation_timestamp);
@@ -202,7 +202,7 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
     // make sure the directory exist
     assert (directory.isDirectory());
     for (File f : directory.listFiles()) {
-      if (f.isFile()) {
+      if (f.isFile() && !f.isHidden()) {
         file_to_timestamp_map_.put(previous_path + f.getName(), timestamp_++);
       } else if (f.isDirectory()) {
         ScanVersionHelper(previous_path + f.getName() + Slash, f);
