@@ -278,10 +278,6 @@ public class Cache {
     timestamp_map_.put(path, timestamp);
   }
 
-  public void foo() throws RemoteException, ServerNotActiveException {
-    System.out.println("Server says: " + remote_manager_.EchoIntBack(123));
-  }
-
   /* set the cache root directory for disk storage */
   public void SetCacheDirectory(String cache_dir) {
     cache_dir_ = cache_dir;
@@ -385,20 +381,11 @@ public class Cache {
     try {
       long cache_file_timestamp = timestamp_map_.getOrDefault(path, CACHE_NO_EXIST);
       /* send validation request to server */
-      ValidateResult validate_result = remote_manager_.Validate(path, cache_file_timestamp);
-      boolean if_exist = validate_result.exist;
+      ValidateResult validate_result =
+          remote_manager_.Validate(new ValidateParam(path, option, cache_file_timestamp));
+      int error_code = validate_result.error_code;
       boolean if_directory = validate_result.is_directory;
-      boolean if_regular = validate_result.is_regular_file;
-      boolean if_can_read = validate_result.can_read;
-      boolean if_can_write = validate_result.can_write;
-      long server_file_timestamp = validate_result.timestamp;
-      byte[] file_data = validate_result.data;
-      if (cache_file_timestamp != server_file_timestamp && server_file_timestamp >= 0
-          && file_data != null) {
-        // new content is updated from the server side, save it
-        SaveData(path, file_data, server_file_timestamp);
-      }
-      if (!if_exist) {
+      if (error_code == FileHandling.Errors.ENOENT) {
         // currently no available version
         FileRecord record = record_map_.get(path);
         if (record != null) {
@@ -406,60 +393,22 @@ public class Cache {
           timestamp_map_.remove(path);
         }
       }
-      // aggregate all error cases across open mode
-      if (!if_exist
-          && (option != FileHandling.OpenOption.CREATE
-              && option != FileHandling.OpenOption.CREATE_NEW)) {
-        // the requested file not found
-        return new OpenReturnVal(null, FileHandling.Errors.ENOENT, false);
+      if (error_code < 0) { // server already checks error for proxy
+        Logger.Log("error cdode < 0 = " + error_code);
+        return new OpenReturnVal(null, error_code, if_directory);
       }
-      if (if_exist && option == FileHandling.OpenOption.CREATE_NEW) {
-        // cannot create new
-        return new OpenReturnVal(null, FileHandling.Errors.EEXIST, false);
-      }
-      if (if_directory) {
-        // the path actually points to a directory
-        if (option != FileHandling.OpenOption.READ) {
-          // can only apply open with read option on directory
-          return new OpenReturnVal(null, FileHandling.Errors.EISDIR, true);
-        }
-        if (!if_can_read) {
-          // no read permission with this directory
-          return new OpenReturnVal(null, FileHandling.Errors.EPERM, true);
-        }
-        // good to go, a dummy directory fd
-        return new OpenReturnVal(null, cache_fd_++, true);
-      }
-      if (!if_regular) {
-        // not a regular file
-        if (option == FileHandling.OpenOption.READ || option == FileHandling.OpenOption.WRITE) {
-          return new OpenReturnVal(null, FileHandling.Errors.EPERM, false);
-        }
-        if (if_exist && option == FileHandling.OpenOption.CREATE) {
-          return new OpenReturnVal(null, FileHandling.Errors.EPERM, false);
-        }
-      }
-      if (!if_can_read) {
-        // read permission not granted
-        if (option == FileHandling.OpenOption.READ) {
-          return new OpenReturnVal(null, FileHandling.Errors.EPERM, false);
-        }
-        if (if_exist && option == FileHandling.OpenOption.CREATE) {
-          // not creating a new one, but old one cannot be read
-          return new OpenReturnVal(null, FileHandling.Errors.EPERM, false);
-        }
-      }
-      if (!if_can_write) {
-        // write permission not granted
-        if (option == FileHandling.OpenOption.WRITE) {
-          return new OpenReturnVal(null, FileHandling.Errors.EPERM, false);
-        }
-        if (if_exist && option == FileHandling.OpenOption.CREATE) {
-          // not creating a new one, but old one cannot be written
-          return new OpenReturnVal(null, FileHandling.Errors.EPERM, false);
-        }
+      long server_file_timestamp = validate_result.timestamp;
+      byte[] file_data = validate_result.data;
+      if (cache_file_timestamp != server_file_timestamp && server_file_timestamp >= 0
+          && file_data != null) {
+        // new content is updated from the server side, save it
+        SaveData(path, file_data, server_file_timestamp);
       }
 
+      if (if_directory) {
+        // the dummy read directory command
+        return new OpenReturnVal(null, cache_fd_++, if_directory);
+      }
       // create new entry in the record map if necessary
       FileRecord record = record_map_.get(path);
       if (record == null) {
@@ -467,9 +416,7 @@ public class Cache {
         record = new FileRecord(path, init_version, init_version);
         record_map_.put(path, record);
       }
-
       return GetAndRegisterFile(record, path, option);
-
     } catch (FileSystemException | FileNotFoundException e) {
       // already check for filenotfound above, assume it is permission problem
       e.printStackTrace();

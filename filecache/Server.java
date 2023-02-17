@@ -55,12 +55,77 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
       return new File(path).canWrite();
     }
 
+    /* server do checking for proxy, so that don't waste bandwidth transferring
+       file back if the validation is failed
+     */
+    private int ErrorCheck(String path, FileHandling.OpenOption option) {
+      boolean if_exist = IfExist(path);
+      boolean if_directory = IfDirectory(path);
+      boolean if_regular = IfRegularFile(path);
+      boolean if_can_read = IfCanRead(path);
+      boolean if_can_write = IfCanWrite(path);
+      // aggregate all error cases across open mode
+      if (!if_exist
+          && (option != FileHandling.OpenOption.CREATE
+              && option != FileHandling.OpenOption.CREATE_NEW)) {
+        // the requested file not found
+        return FileHandling.Errors.ENOENT;
+      }
+      if (if_exist && option == FileHandling.OpenOption.CREATE_NEW) {
+        // cannot create new
+        return FileHandling.Errors.EEXIST;
+      }
+      if (if_directory) {
+        // the path actually points to a directory
+        if (option != FileHandling.OpenOption.READ) {
+          // can only apply open with read option on directory
+          return FileHandling.Errors.EISDIR;
+        }
+        if (!if_can_read) {
+          // no read permission with this directory
+          return FileHandling.Errors.EPERM;
+        }
+        return 0;
+      }
+      if (!if_regular) {
+        // not a regular file
+        if (option == FileHandling.OpenOption.READ || option == FileHandling.OpenOption.WRITE) {
+          return FileHandling.Errors.EPERM;
+        }
+        if (if_exist && option == FileHandling.OpenOption.CREATE) {
+          return FileHandling.Errors.EPERM;
+        }
+      }
+      if (!if_can_read) {
+        // read permission not granted
+        if (option == FileHandling.OpenOption.READ) {
+          return FileHandling.Errors.EPERM;
+        }
+        if (if_exist && option == FileHandling.OpenOption.CREATE) {
+          // not creating a new one, but old one cannot be read
+          return FileHandling.Errors.EPERM;
+        }
+      }
+      if (!if_can_write) {
+        // write permission not granted
+        if (option == FileHandling.OpenOption.WRITE) {
+          return FileHandling.Errors.EPERM;
+        }
+        if (if_exist && option == FileHandling.OpenOption.CREATE) {
+          // not creating a new one, but old one cannot be written
+          return FileHandling.Errors.EPERM;
+        }
+      }
+      return 0; // no error detected
+    }
+
     @Override
-    public ValidateResult Validate(String path, long timestamp) {
+    public ValidateResult Validate(String path, FileHandling.OpenOption option, long timestamp) {
       long server_file_timestamp = file_to_timestamp_map_.getOrDefault(path, SERVER_NO_EXIST);
-      ValidateResult res = new ValidateResult(IfExist(path), IfDirectory(path), IfRegularFile(path),
-          IfCanRead(path), IfCanWrite(path), server_file_timestamp);
-      if (server_file_timestamp != SERVER_NO_EXIST && timestamp != server_file_timestamp) {
+      int error_code = ErrorCheck(path, option);
+      ValidateResult res = new ValidateResult(error_code, IfDirectory(path), server_file_timestamp);
+      if (error_code == 0 && server_file_timestamp != SERVER_NO_EXIST
+          && timestamp != server_file_timestamp) {
         // the server shall provide updated version to proxy
         byte[] file_data = LoadFile(path);
         res.CarryData(file_data);
@@ -103,19 +168,15 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
   }
 
   @Override
-  public String EchoIntBack(int i) throws RemoteException, ServerNotActiveException {
-    System.out.println(getClientHost());
-    return "Server echoes: " + i;
-  }
-
-  @Override
-  public ValidateResult Validate(String path, long validation_timestamp) throws RemoteException {
-    path = FormatPath(path);
+  public ValidateResult Validate(ValidateParam param) throws RemoteException {
+    String path = FormatPath(param.path);
+    FileHandling.OpenOption option = param.option;
+    long validation_timestamp = param.proxy_timestamp;
     Logger.Log(
         "Validate Request of path=" + path + " with proxy-side timestamp=" + validation_timestamp);
     mtx_.lock();
     try {
-      return checker_.Validate(path, validation_timestamp);
+      return checker_.Validate(path, option, validation_timestamp);
     } finally {
       mtx_.unlock();
     }
@@ -206,7 +267,7 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
     for (File f : directory.listFiles()) {
       if (f.isFile() && !f.isHidden()) {
         file_to_timestamp_map_.put(previous_path + f.getName(), timestamp_++);
-      } else if (f.isDirectory()) {
+      } else if (f.isDirectory() && !f.isHidden()) {
         ScanVersionHelper(previous_path + f.getName() + Slash, f);
       }
     }

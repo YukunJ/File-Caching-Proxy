@@ -224,9 +224,12 @@ void test_concurrent_proxy(int id) {
 }
 
 int main(int argc, char* argv[]) {
+  test_5();
+  exit(0);
   char buf[100] = {0};
   errno = 0;
   int fd1 = open(argv[1], O_RDONLY);
+
   check();
   int fd2 = open(argv[1], O_RDONLY);
   check();
