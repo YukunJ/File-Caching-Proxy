@@ -1,7 +1,7 @@
 # this is my proxyport and pin used locally
-export proxyport15440=20080
-export pin15440=990105702
-export CLASSPATH=${PWD}:${PWD}/../lib
+# export proxyport15440=20080
+# export pin15440=990105702
+# export CLASSPATH=${PWD}:${PWD}/../lib
 # LD_PRELOAD=../lib/lib440lib.so tools/440read foo
 
 # define compiler and compiler flag variables
@@ -9,7 +9,7 @@ JFLAGS = -g
 JC = javac
 
 # set necessary environment variables as well
-all: Proxy.class Cache.class
+all: Server.class Proxy.class Cache.class Logger.java FileManagerRemote.java ValidateResult.java ValidateParam.java FileChecker.java
 
 %.class: %.java
 	$(JC) $(JFLAGS) $*.java
@@ -24,7 +24,7 @@ format:
 .PHONY: submit
 submit:
 	# submit by compressing tar
-	tar cvzf ../mysolution.tgz Makefile Proxy.java Cache.java
+	tar cvzf ../mysolution.tgz Makefile Server.java Proxy.java Cache.java Logger.java FileChecker.java FileManagerRemote.java ValidateResult.java ValidateParam.java
 
 # clean up command
 .PHONY: clean

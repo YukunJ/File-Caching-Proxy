@@ -1,8 +1,0 @@
-build/
-cmake-build-debug/
-*.DS_Store
-*.iml
-*.xml
-.idea/
-*/.ipynb_checkpoints/
-.vscode/
