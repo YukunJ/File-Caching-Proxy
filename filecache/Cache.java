@@ -173,22 +173,42 @@ class FileRecord {
     Version writer_version = version_map_.get(version_id);
     byte[] data;
     try {
-      RandomAccessFile file =
-          new RandomAccessFile(Cache.FormatPath(writer_version.ToFileName()), Cache.READER_MODE);
-      data = new byte[(int) file.length()];
-      file.read(data);
-      file.close();
-
       // must be 0 now
       assert (writer_version.MinusRefCount() == 0);
+
+      RandomAccessFile file =
+          new RandomAccessFile(Cache.FormatPath(writer_version.ToFileName()), Cache.READER_MODE);
+      Integer max_chunk_size = FileChunk.CHUNK_SIZE;
+      Integer file_remain_size = (int) (file.length() - file.getFilePointer());
+      Integer chunk_size = Math.min(max_chunk_size, file_remain_size);
+      Boolean is_end = (file_remain_size <= max_chunk_size);
+      data = new byte[chunk_size];
+      file.read(data);
+      // upload new version to server iteratively chunk-by-chunk and record the timestamp
+      String origin_filename = writer_version.filename_;
+      Long[] tuple = Cache.remote_manager_.Upload(origin_filename, new FileChunk(data, is_end, -1));
+      Long server_timestamp = tuple[0];
+      Integer chunk_id = tuple[1].intValue();
+      int loop_id = 0;
+      while (!is_end) {
+        file_remain_size = (int) (file.length() - file.getFilePointer());
+        chunk_size = Math.min(max_chunk_size, file_remain_size);
+        is_end = (file_remain_size <= max_chunk_size);
+        data = new byte[chunk_size];
+        file.read(data);
+        Cache.remote_manager_.UploadChunk(new FileChunk(data, is_end, chunk_id));
+        loop_id++;
+        Logger.Log(
+            "Upload file=" + origin_filename + " of chunk_size=" + chunk_size + " iter=" + loop_id);
+        if (is_end) {
+          Logger.Log("End of Upload file=" + origin_filename);
+        }
+      }
+      file.close();
       // install to be available new reader version
       int install_version_id = writer_version.version_;
       SetReaderVersionId(install_version_id);
       // should not remove this version from map, future reader need it
-
-      // upload new version to server and record the timestamp
-      String origin_filename = writer_version.filename_;
-      Long server_timestamp = Cache.remote_manager_.Upload(origin_filename, data);
       Cache.UpdateTimestamp(origin_filename, server_timestamp);
 
     } catch (Exception e) {
@@ -344,7 +364,7 @@ public class Cache {
   }
 
   /* save a file transferred from server into local cache directory */
-  private void SaveData(String path, byte[] data, Long server_timestamp) {
+  private void SaveData(String path, FileChunk chunk, Long server_timestamp) {
     try {
       FileRecord record = record_map_.get(path);
       if (record == null) {
@@ -356,15 +376,24 @@ public class Cache {
       record.version_map_.put(version_id, version);
 
       String cache_path = FormatPath(version.ToFileName());
-      assert (cache_path.startsWith(cache_dir_) && data != null);
-      Logger.Log(
-          "SaveData for cache_path=" + cache_path + " of size=" + data.length + " from server");
+      assert (cache_path.startsWith(cache_dir_) && chunk != null);
       RandomAccessFile file = new RandomAccessFile(cache_path, WRITER_MODE);
       file.setLength(0); // clear off content
-      file.write(data);
+      int loop_id = 0;
+      while (true) {
+        loop_id++;
+        file.write(chunk.data);
+        Logger.Log(
+            "Download file=" + path + " of chunk_size=" + chunk.data.length + " iter=" + loop_id);
+        if (chunk.end_of_file) {
+          Logger.Log("End of Download file=" + path);
+          break;
+        } else {
+          chunk = remote_manager_.DownloadChunk(chunk.chunk_id);
+        }
+      }
       file.close();
       UpdateTimestamp(path, server_timestamp); // save the server timestamp for original path
-
       record.SetReaderVersionId(version_id); // make this version available to clients
     } catch (Exception e) {
       e.printStackTrace();
@@ -394,15 +423,15 @@ public class Cache {
         }
       }
       if (error_code < 0) { // server already checks error for proxy
-        Logger.Log("error cdode < 0 = " + error_code);
         return new OpenReturnVal(null, error_code, if_directory);
       }
       long server_file_timestamp = validate_result.timestamp;
-      byte[] file_data = validate_result.data;
+      FileChunk file_chunk = validate_result.chunk;
       if (cache_file_timestamp != server_file_timestamp && server_file_timestamp >= 0
-          && file_data != null) {
+          && file_chunk != null) {
         // new content is updated from the server side, save it
-        SaveData(path, file_data, server_file_timestamp);
+        // iteratively ask for more chunks from server until EOF
+        SaveData(path, file_chunk, server_file_timestamp);
       }
 
       if (if_directory) {

@@ -11,19 +11,15 @@
 import static java.lang.Thread.sleep;
 
 import java.io.File;
-import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.net.MalformedURLException;
-import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.rmi.Naming;
 import java.rmi.RemoteException;
 import java.rmi.registry.*;
-import java.rmi.server.ServerNotActiveException;
 import java.rmi.server.UnicastRemoteObject;
 import java.util.HashMap;
-import java.util.Objects;
 import java.util.concurrent.locks.ReentrantLock;
 
 public class Server extends UnicastRemoteObject implements FileManagerRemote {
@@ -127,20 +123,30 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
       if (error_code == 0 && server_file_timestamp != SERVER_NO_EXIST
           && timestamp != server_file_timestamp) {
         // the server shall provide updated version to proxy
-        byte[] file_data = LoadFile(path);
-        res.CarryData(file_data);
+        FileChunk chunk = LoadFile(path);
+        res.CarryChunk(chunk);
       }
       return res;
     }
 
-    /* Load a local file into an byte array, ready to be transferred over RMI */
-    public byte[] LoadFile(String path) {
+    /* Load a local file to be sent in chunk-by-chunk fashion */
+    public FileChunk LoadFile(String path) {
       assert (new File(path).exists());
       try {
+        Integer chunk_id = file_chunk_id++;
         RandomAccessFile f = new RandomAccessFile(path, READER_MODE);
-        byte[] data = new byte[(int) f.length()];
+        Integer whole_file_size = (int) f.length();
+        Integer max_chunk_size = FileChunk.CHUNK_SIZE;
+        Integer chunk_size = Math.min(whole_file_size, max_chunk_size);
+        byte[] data = new byte[chunk_size];
         f.read(data);
-        return data;
+        boolean is_end = (max_chunk_size >= whole_file_size);
+        if (!is_end) {
+          file_download_chunk_map_.put(chunk_id, f);
+        } else {
+          f.close();
+        }
+        return new FileChunk(data, is_end, chunk_id);
       } catch (Exception e) {
         e.printStackTrace();
       }
@@ -150,6 +156,10 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
 
   private final ReentrantLock mtx_;
   private final HashMap<String, Long> file_to_timestamp_map_;
+  private Integer file_chunk_id = 0;
+  private final HashMap<Integer, RandomAccessFile> file_download_chunk_map_;
+
+  private final HashMap<Integer, RandomAccessFile> file_upload_chunk_map_;
   private long timestamp_ = 0;
   public final String READER_MODE = "r";
   public final String WRITER_MODE = "rw";
@@ -162,6 +172,8 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
     super(0);
     mtx_ = new ReentrantLock();
     file_to_timestamp_map_ = new HashMap<>();
+    file_download_chunk_map_ = new HashMap<>();
+    file_upload_chunk_map_ = new HashMap<>();
     root_dir_ = root_dir;
     checker_ = new ServerFileChecker();
     InitScanVersion();
@@ -182,22 +194,68 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
     }
   }
 
+  @Override
+  public FileChunk DownloadChunk(Integer chunk_id) throws IOException, RemoteException {
+    mtx_.lock();
+    try {
+      assert (file_download_chunk_map_.containsKey(chunk_id));
+      RandomAccessFile f = file_download_chunk_map_.get(chunk_id);
+      long curr_pos = f.getFilePointer();
+      long total_len = f.length();
+      Integer file_remain_length = (int) (total_len - curr_pos);
+      Integer max_chunk_size = FileChunk.CHUNK_SIZE;
+      Integer chunk_size = Math.min(file_remain_length, max_chunk_size);
+      byte[] data = new byte[chunk_size];
+      f.read(data);
+      boolean is_end = (max_chunk_size >= file_remain_length);
+      if (is_end) {
+        file_download_chunk_map_.remove(chunk_id);
+      }
+      return new FileChunk(data, is_end, chunk_id);
+    } finally {
+      mtx_.unlock();
+    }
+  }
+
   /**
    * RMI: Upload a file to the server side, requested by proxy
    */
   @Override
-  public long Upload(String path, byte[] data) throws RemoteException, IOException {
+  public Long[] Upload(String path, FileChunk chunk) throws RemoteException, IOException {
     path = FormatPath(path);
-    Logger.Log("Upload Request of path=" + path + " payload=" + data.length);
+    Logger.Log("Upload Request of path=" + path);
     mtx_.lock();
     try {
+      Long chunk_id = (long) file_chunk_id++;
       RandomAccessFile file = new RandomAccessFile(path, WRITER_MODE);
       // clear the content of the file if existing
       file.setLength(0);
-      file.write(data);
-      file.close();
+      file.write(chunk.data);
+      if (chunk.end_of_file) {
+        file.close();
+      } else {
+        file_upload_chunk_map_.put(chunk_id.intValue(), file);
+      }
       file_to_timestamp_map_.put(path, ++timestamp_);
-      return timestamp_; // already incremented above
+      Long[] tuple = new Long[2];
+      tuple[0] = timestamp_;
+      tuple[1] = chunk_id;
+      return tuple;
+    } finally {
+      mtx_.unlock();
+    }
+  }
+
+  @Override
+  public void UploadChunk(FileChunk chunk) throws RemoteException, IOException {
+    mtx_.lock();
+    try {
+      assert (file_upload_chunk_map_.containsKey(chunk.chunk_id));
+      RandomAccessFile f = file_upload_chunk_map_.get(chunk.chunk_id);
+      f.write(chunk.data);
+      if (chunk.end_of_file) {
+        file_upload_chunk_map_.remove(chunk.chunk_id);
+      }
     } finally {
       mtx_.unlock();
     }

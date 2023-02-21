@@ -224,7 +224,13 @@ void test_concurrent_proxy(int id) {
 }
 
 int main(int argc, char* argv[]) {
-  test_5();
+  // download 5mb.txt from server
+  int fd_0 = open(argv[1], O_RDWR);
+  // write some junk to the end and try upload to server
+  lseek(fd_0, 0, SEEK_END);  // to the end
+  const char* msg = "hello from client";
+  write(fd_0, msg, strlen(msg));
+  close(fd_0);
   exit(0);
   char buf[100] = {0};
   errno = 0;

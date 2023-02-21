@@ -19,16 +19,16 @@ public class ValidateResult implements Serializable {
   boolean is_directory;
   long timestamp;
 
-  byte[] data;
+  FileChunk chunk;
 
   public ValidateResult(int error_code, boolean is_directory, long timestamp) {
     this.error_code = error_code;
     this.is_directory = is_directory;
     this.timestamp = timestamp;
-    this.data = null;
+    this.chunk = null;
   }
 
-  public void CarryData(byte[] file_data) {
-    this.data = file_data;
+  public void CarryChunk(FileChunk file_chunk) {
+    this.chunk = file_chunk;
   }
 }
