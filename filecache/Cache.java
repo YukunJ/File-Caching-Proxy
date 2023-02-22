@@ -7,7 +7,7 @@
  * It needs to control the overall size of cached file
  *
  * and to retain session semantics, it will return a
- * RandomAccessFile to Proxy upon request, and depending whether
+ * RandomAccessFile to Proxy upon request, and depending on whether
  * it's read mode or write mode, may create a new temp file or use old file
  *
  * File are represented as FileRecord, which records the version number of one file
@@ -26,6 +26,8 @@ import java.nio.file.StandardCopyOption;
 import java.rmi.RemoteException;
 import java.rmi.server.ServerNotActiveException;
 import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.concurrent.locks.ReentrantLock;
 
 /* For Cache returns to Proxy */
@@ -247,18 +249,6 @@ class FileRecord {
     File dest = new File(dest_name);
     Files.copy(src.toPath(), dest.toPath(), StandardCopyOption.REPLACE_EXISTING);
   }
-
-  /**
-   * delete a file specified by the name
-   */
-  public static void DeleteFile(String name) {
-    File file = new File(name);
-    try {
-      boolean success = file.delete();
-    } catch (Exception e) {
-      e.printStackTrace();
-    }
-  }
 }
 
 public class Cache {
@@ -272,7 +262,7 @@ public class Cache {
   public static FileManagerRemote remote_manager_; // to communicate with Server
   private static final HashMap<String, Long> timestamp_map_ = new HashMap<>();
   private int cache_fd_;
-  private final HashMap<String, FileRecord> record_map_;
+  private static final HashMap<String, FileRecord> record_map_ = new HashMap<>();
   private final HashMap<Integer, RandomAccessFile> fd_handle_map_;
   private final HashMap<Integer, String> fd_filename_map_;
 
@@ -280,13 +270,19 @@ public class Cache {
 
   private final HashMap<Integer, FileHandling.OpenOption> fd_option_map_;
 
+  /* the lru freshness ordering of all versions of cached file in this local Cache Proxy */
+  public final static LinkedHashSet<Version> lru_ = new LinkedHashSet<>();
+
+  private static Long cache_occupancy_ = 0L;
+
+  private static Long cache_capacity_ = 0L;
+
   private final ReentrantLock mtx_;
 
   private static String cache_dir_;
 
   public Cache() {
     cache_fd_ = INIT_FD;
-    record_map_ = new HashMap<>();
     fd_handle_map_ = new HashMap<>();
     fd_filename_map_ = new HashMap<>();
     fd_version_map_ = new HashMap<>();
@@ -298,6 +294,106 @@ public class Cache {
     timestamp_map_.put(path, timestamp);
   }
 
+  /* Helper function to see the current status of cache structure */
+  public static void PrintCache() {
+    Logger.Log("-----------Cache Status:------------");
+    for (Version file_version : lru_) {
+      Logger.LogNoPromptNewLine(file_version.ToFileName() + "("
+          + (new File(Cache.FormatPath(file_version.ToFileName())).length()) + " bytes) <--- ");
+    }
+  }
+
+  public void SetCacheCapacity(Long capacity) {
+    cache_capacity_ = capacity;
+  }
+
+  public long GetCacheOccupancy() {
+    return cache_occupancy_;
+  }
+
+  /*
+     register/update a whole filepath into the LRU cache
+     size update should be done separately
+   */
+  public static void HitFileInLRUCache(Version file_version) {
+    // try remove first to update its freshness position
+    RemoveFileFromLRUCache(file_version);
+    lru_.add(file_version);
+  }
+
+  public static void RemoveFileFromLRUCache(Version file_version) {
+    lru_.remove(file_version);
+  }
+
+  public static void IncreaseCacheOccupancy(Long size) {
+    cache_occupancy_ += size;
+    assert (cache_occupancy_ <= cache_capacity_);
+  }
+
+  public static void DecreaseCacheOccupancy(Long size) {
+    cache_occupancy_ -= size;
+    assert (cache_occupancy_ >= 0);
+  }
+
+  /* Reserve a certain space from cache
+     Upon success, 'size' space will be reserved for the caller to use and return True
+     If no space is available, it will try evict a few other entries if possible
+
+     However, if all entries are in use, or not space available possible (resever ~100GB file)
+     It returns False
+   */
+  public static boolean ReserveCacheSpace(Long size) {
+    long remain = cache_capacity_ - cache_occupancy_;
+    if (remain >= size) {
+      IncreaseCacheOccupancy(size);
+      return true;
+    }
+    // current remain space is not enough, need to evict
+    while (EvictOneCacheEntry()) {
+      remain = cache_capacity_ - cache_occupancy_;
+      if (remain >= size) {
+        IncreaseCacheOccupancy(size);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /* Remove a specific file version from both disk and cache entry
+     typically happens when pruning so that no client will ever see a stale cached version of a file
+   */
+  public static void EvictCacheEntry(Version file_version) {
+    String full_path = Cache.FormatPath(file_version.ToFileName());
+    assert (lru_.contains(file_version) && new File(full_path).exists());
+    lru_.remove(file_version);
+    DecreaseCacheOccupancy(DeleteFile(full_path));
+  }
+
+  /* Try to evict one entry from LRU Cache by LRU policy
+     if no entry can be removed, return False
+   */
+  public static boolean EvictOneCacheEntry() {
+    if (lru_.isEmpty()) {
+      return false;
+    }
+    for (Version file_version : lru_) {
+      if (file_version.GetRefCount() > 0) {
+        // some other clients are using it, cannot evcit yet
+        continue;
+      }
+      String full_path = Cache.FormatPath(file_version.ToFileName());
+      int reader_version_id = record_map_.get(file_version.filename_).GetReaderVersionId();
+      if (reader_version_id == file_version.version_) {
+        // the reader version is masked off
+        record_map_.get(file_version.filename_).SetReaderVersionId(-1);
+      }
+      long freed_space = DeleteFile(full_path);
+      DecreaseCacheOccupancy(freed_space);
+      return true;
+    }
+    return false;
+  }
+
   /* set the cache root directory for disk storage */
   public void SetCacheDirectory(String cache_dir) {
     cache_dir_ = cache_dir;
@@ -306,6 +402,23 @@ public class Cache {
   /* add the handler to enable communicating with Server */
   public void AddRemoteFileManager(FileManagerRemote remote_manager) {
     this.remote_manager_ = remote_manager;
+  }
+
+  /**
+   * delete a file specified by the name
+   * and return the deleted file's size for adjusting cache storage
+   */
+  public static long DeleteFile(String name) {
+    File file = new File(name);
+    assert (file.exists());
+    try {
+      long size = file.length();
+      boolean success = file.delete();
+      return size;
+    } catch (Exception e) {
+      e.printStackTrace();
+    }
+    return 0;
   }
 
   /* do book-keeping after a successful open */

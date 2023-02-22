@@ -193,12 +193,14 @@ class Proxy {
     String server_address = args[0];
     String server_port = args[1];
     String cache_dir = args[2];
+    Long cache_capacity = Long.parseLong(args[3]);
     String server_lookup = Slash + Slash + server_address + Colon + server_port + Slash
         + FileManagerRemote.SERVER_NAME;
     Logger.Log("Proxy starts running with cache_dir=" + cache_dir
         + " and server lookup address=" + server_lookup);
     FileManagerRemote remote_manager = (FileManagerRemote) Naming.lookup(server_lookup);
     Proxy.cache.SetCacheDirectory(cache_dir);
+    Proxy.cache.SetCacheCapacity(cache_capacity);
     Proxy.cache.AddRemoteFileManager(remote_manager);
     (new RPCreceiver(new FileHandlingFactory())).run();
   }

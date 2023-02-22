@@ -13,6 +13,14 @@ public class Logger {
     System.err.println("###Logging###: " + msg);
   }
 
+  public static void LogNoPromptNewLine(String msg) {
+    // tunable parameter to control the maximum amount of LOGGING
+    if (count++ > LOG_MAX) {
+      return;
+    }
+    System.err.print(msg);
+  }
+
   public static String OpenOptionToString(FileHandling.OpenOption option) {
     if (option == FileHandling.OpenOption.READ) {
       return "READ";
