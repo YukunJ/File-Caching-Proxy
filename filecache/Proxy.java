@@ -65,28 +65,33 @@ class Proxy {
       }
       Logger.Log("open request: path=" + path + " normalized=" + normalized_path
           + " option=" + Logger.OpenOptionToString(o) + " with return_fd=" + fd);
+      Cache.PrintCache();
       return fd;
     }
 
     public int close(int fd) {
       Logger.Log("close request: fd=" + fd);
-      if (!fd_filehandle_map_.containsKey(fd) && !fd_directory_set_.contains(fd)) {
-        return FileHandling.Errors.EBADF;
-      }
-      if (fd_filehandle_map_.containsKey(fd)) {
-        RandomAccessFile handle = fd_filehandle_map_.get(fd);
-        try {
-          handle.close();
-          fd_filehandle_map_.remove(fd);
-          fd_option_map_.remove(fd);
-          return cache.close(fd);
-        } catch (IOException e) {
-          return EIO;
+      try {
+        if (!fd_filehandle_map_.containsKey(fd) && !fd_directory_set_.contains(fd)) {
+          return FileHandling.Errors.EBADF;
         }
-      } else {
-        // close a dummy directory
-        fd_directory_set_.remove(fd);
-        return 0;
+        if (fd_filehandle_map_.containsKey(fd)) {
+          RandomAccessFile handle = fd_filehandle_map_.get(fd);
+          try {
+            handle.close();
+            fd_filehandle_map_.remove(fd);
+            fd_option_map_.remove(fd);
+            return cache.close(fd);
+          } catch (IOException e) {
+            return EIO;
+          }
+        } else {
+          // close a dummy directory
+          fd_directory_set_.remove(fd);
+          return 0;
+        }
+      } finally {
+        Cache.PrintCache();
       }
     }
 
@@ -102,6 +107,15 @@ class Proxy {
       }
       RandomAccessFile file_handle = fd_filehandle_map_.get(fd);
       try {
+        long advance_size = file_handle.length() - file_handle.getFilePointer() - (long) buf.length;
+        if (advance_size > 0) {
+          // exceed the current size of file, need to reserve space from cache disk
+          boolean success = Cache.ReserveCacheSpace(advance_size, true);
+          if (!success) {
+            // exceed storage limit
+            return Errors.ENOMEM;
+          }
+        }
         file_handle.write(buf);
         return buf.length;
       } catch (Exception e) {
@@ -169,7 +183,11 @@ class Proxy {
     public int unlink(String path) {
       String normalized_path = Paths.get(path).normalize().toString();
       Logger.Log("unlink request: path=" + path + " normalized=" + normalized_path);
-      return cache.unlink(normalized_path);
+      try {
+        return cache.unlink(normalized_path);
+      } finally {
+        Cache.PrintCache();
+      }
     }
 
     public void clientdone() {

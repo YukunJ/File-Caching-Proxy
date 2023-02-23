@@ -223,12 +223,36 @@ void test_concurrent_proxy(int id) {
   exit(0);
 }
 
+/**
+    @ test basic lru workflow when not overflow
+    @ pre: server side has A.txt B.txt C.txt
+*/
+void test_lru_0() {
+  int fd_A = open("A.txt", O_RDONLY);
+  close(fd_A);
+
+  int fd_B = open("B.txt", O_RDONLY);
+  close(fd_B);
+
+  int fd_C = open("C.txt", O_RDONLY);
+  close(fd_C);
+}
+
+/**
+    @ test basic lru workflow when a file is unlinked
+    @ pre: server side has A.txt
+*/
+void test_lru_1() {
+  int fd_A = open("A.txt", O_RDONLY);
+  close(fd_A);
+
+  unlink("A.txt");
+}
+
 int main(int argc, char* argv[]) {
   // download 5mb.txt from server
-  int f = open(argv[1], O_WRONLY);
-  write(f, "jyk", 3);
-  close(f);
-  exit(1);
+  test_lru_1();
+  exit(0);
   int fd_0 = open(argv[1], O_RDWR);
   // write some junk to the end and try upload to server
   lseek(fd_0, 0, SEEK_END);  // to the end
