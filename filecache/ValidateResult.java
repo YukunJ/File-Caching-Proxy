@@ -7,7 +7,8 @@
  * about the version validation of a file open request
  *
  * if the proxy version is stale, server will supply the fresh
- * file in this return value, along with existence/directory/read/write permission flags, etc
+ * file in this return value, along with existence/directory/read/write
+ * permission flags, etc
  * */
 
 import java.io.Serializable;
@@ -28,7 +29,6 @@ public class ValidateResult implements Serializable {
     this.chunk = null;
   }
 
-  public void CarryChunk(FileChunk file_chunk) {
-    this.chunk = file_chunk;
-  }
+  /* may carry a file chunk if Proxy's file version is outdated */
+  public void CarryChunk(FileChunk file_chunk) { this.chunk = file_chunk; }
 }

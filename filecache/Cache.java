@@ -7,12 +7,12 @@
  * It needs to control the overall size of cached file
  *
  * and to retain session semantics, it will return a
- * RandomAccessFile to Proxy upon request, and depending whether
+ * RandomAccessFile to Proxy upon request, and depending on whether
  * it's read mode or write mode, may create a new temp file or use old file
  *
- * File are represented as FileRecord, which records the version number of one file
- * and keep reference count of each version and delete the version when refernce
- * count drops to zero.
+ * File are represented as FileRecord, which records the version number of one
+ * file and keep reference count of each version and delete the version when
+ * refernce count drops to zero.
  */
 
 import java.io.File;
@@ -25,7 +25,10 @@ import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.rmi.RemoteException;
 import java.rmi.server.ServerNotActiveException;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.concurrent.locks.ReentrantLock;
 
 /* For Cache returns to Proxy */
@@ -67,17 +70,11 @@ class Version {
     ref_count_ = 0;
   }
 
-  public int GetRefCount() {
-    return ref_count_;
-  }
+  public int GetRefCount() { return ref_count_; }
 
-  public int PlusRefCount() {
-    return ++ref_count_;
-  }
+  public int PlusRefCount() { return ++ref_count_; }
 
-  public int MinusRefCount() {
-    return --ref_count_;
-  }
+  public int MinusRefCount() { return --ref_count_; }
 
   public String ToFileName() {
     return filename_ + ((version_ == 0) ? "" : Integer.toString(version_));
@@ -85,26 +82,37 @@ class Version {
 }
 
 class FileRecord {
+  public static int INITIAL_VERSION = 0;
+
+  public static int NON_EXIST_VERSION = -1;
+
+  public static int NON_REFERENCE = 0;
+
+  public static int TIMESTAMP_INDEX = 0;
+
+  public static int CHUNK_INDEX = 1;
   private final String filename_;
 
   public final HashMap<Integer, Version> version_map_;
 
-  /* the latest reader-visible version, if -1 means no one can see this file now */
+  /* the latest reader-visible version, if -1 means no one can see this file now
+   */
   private int reader_version_;
 
   /* the latest spawn version by writer, monotonically increasing */
   private int latest_version_;
 
   /* if the file already exists on disk, reader_version is init to 0
-     if new writer create this file, reader_version is init to -1 so no one sees it until commit
+     if new writer create this file, reader_version is init to -1 so no one sees
+     it until commit
    */
   public FileRecord(String filename, int reader_version, int latest_version) {
     filename_ = filename;
     reader_version_ = reader_version;
     latest_version_ = latest_version;
     version_map_ = new HashMap<>();
-    if (reader_version == 0) {
-      version_map_.put(0, new Version(filename, 0));
+    if (reader_version == INITIAL_VERSION) {
+      version_map_.put(INITIAL_VERSION, new Version(filename, INITIAL_VERSION));
     }
   }
 
@@ -113,15 +121,14 @@ class FileRecord {
    * caller should ensure that reader_version >= 0 already
    */
   public FileReturnVal GetReaderFile() throws Exception {
-    assert (reader_version_ >= 0);
     int reader_version_id = GetReaderVersionId();
     Version reader_version = GetReaderVersion();
     String reader_filename = reader_version.ToFileName();
     String cache_reader_filepath = Cache.FormatPath(reader_filename);
-    RandomAccessFile file_handle = new RandomAccessFile(cache_reader_filepath, Cache.READER_MODE);
-    Logger.Log("GerReaderFile for cache_path=" + cache_reader_filepath
-        + " with reader_version=" + reader_version_id);
+    RandomAccessFile file_handle =
+        new RandomAccessFile(cache_reader_filepath, Cache.READER_MODE);
     reader_version.PlusRefCount();
+    Cache.HitFileInLRUCache(reader_version);
     return new FileReturnVal(file_handle, reader_version_id);
   }
 
@@ -135,18 +142,26 @@ class FileRecord {
     Version writer_version = new Version(filename_, writer_version_id);
     String writer_filename = writer_version.ToFileName();
     String cache_writer_filepath = Cache.FormatPath(writer_filename);
-    Logger.Log("GetWriteFile() for cache_path=" + cache_writer_filepath
-        + " with writer_version=" + writer_version.version_);
-    if (GetReaderVersionId() >= 0) {
+    if (GetReaderVersionId() >= INITIAL_VERSION) {
       // there is existing version, copy it
       String reader_filename = GetReaderVersion().ToFileName();
+      GetReaderVersion()
+          .PlusRefCount(); // temporarily protect this reader file, do not evict
       String cache_reader_filepath = Cache.FormatPath(reader_filename);
+      boolean success = Cache.ReserveCacheSpace(
+          new File(cache_reader_filepath).length(), false);
+      if (!success) {
+        GetReaderVersion().MinusRefCount();
+        return new FileReturnVal(null, FileHandling.Errors.ENOMEM);
+      }
       CopyFile(cache_writer_filepath, cache_reader_filepath);
-      Logger.Log(
-          "Make a cache copy from " + cache_reader_filepath + " to " + cache_writer_filepath);
+      GetReaderVersion().MinusRefCount();
     }
-    RandomAccessFile file_handle = new RandomAccessFile(cache_writer_filepath, Cache.WRITER_MODE);
-    version_map_.put(writer_version_id, writer_version); // must be an exclusive version
+    Cache.HitFileInLRUCache(writer_version);
+    RandomAccessFile file_handle =
+        new RandomAccessFile(cache_writer_filepath, Cache.WRITER_MODE);
+    version_map_.put(writer_version_id,
+                     writer_version); // must be an exclusive version
     writer_version.PlusRefCount();
     return new FileReturnVal(file_handle, writer_version_id);
   }
@@ -157,11 +172,14 @@ class FileRecord {
    */
   public void CloseReaderFile(int version_id) {
     Version reader_version = version_map_.get(version_id);
+    Cache.HitFileInLRUCache(reader_version);
     int remain_ref_count = reader_version.MinusRefCount();
-    if (remain_ref_count == 0 && version_id != GetReaderVersionId()) {
+    if (remain_ref_count == NON_REFERENCE &&
+        version_id != GetReaderVersionId()) {
       // no more client will see this version
       // version_map_.remove(version_id);
-      // TODO: remove this version's associated disk file to clear cache space
+      version_map_.remove(version_id);
+      Cache.EvictCacheEntry(reader_version);
     }
   }
 
@@ -171,44 +189,50 @@ class FileRecord {
    */
   public void CloseWriterFile(int version_id) {
     Version writer_version = version_map_.get(version_id);
+    Cache.HitFileInLRUCache(writer_version);
     byte[] data;
     try {
       // must be 0 now
-      assert (writer_version.MinusRefCount() == 0);
-
-      RandomAccessFile file =
-          new RandomAccessFile(Cache.FormatPath(writer_version.ToFileName()), Cache.READER_MODE);
+      writer_version.MinusRefCount();
+      RandomAccessFile file = new RandomAccessFile(
+          Cache.FormatPath(writer_version.ToFileName()), Cache.READER_MODE);
       Integer max_chunk_size = FileChunk.CHUNK_SIZE;
-      Integer file_remain_size = (int) (file.length() - file.getFilePointer());
+      Integer file_remain_size = (int)(file.length() - file.getFilePointer());
       Integer chunk_size = Math.min(max_chunk_size, file_remain_size);
       Boolean is_end = (file_remain_size <= max_chunk_size);
       data = new byte[chunk_size];
       file.read(data);
-      // upload new version to server iteratively chunk-by-chunk and record the timestamp
+      // upload new version to server iteratively chunk-by-chunk and record the
+      // timestamp
       String origin_filename = writer_version.filename_;
-      Long[] tuple = Cache.remote_manager_.Upload(origin_filename, new FileChunk(data, is_end, -1));
-      Long server_timestamp = tuple[0];
-      Integer chunk_id = tuple[1].intValue();
-      int loop_id = 0;
+      Long[] tuple = Cache.remote_manager_.Upload(
+          origin_filename, new FileChunk(data, is_end, NON_EXIST_VERSION));
+      Long server_timestamp = tuple[TIMESTAMP_INDEX];
+      Integer chunk_id = tuple[CHUNK_INDEX].intValue();
       while (!is_end) {
-        file_remain_size = (int) (file.length() - file.getFilePointer());
+        file_remain_size = (int)(file.length() - file.getFilePointer());
         chunk_size = Math.min(max_chunk_size, file_remain_size);
         is_end = (file_remain_size <= max_chunk_size);
         data = new byte[chunk_size];
         file.read(data);
-        Cache.remote_manager_.UploadChunk(new FileChunk(data, is_end, chunk_id));
-        loop_id++;
-        Logger.Log(
-            "Upload file=" + origin_filename + " of chunk_size=" + chunk_size + " iter=" + loop_id);
-        if (is_end) {
-          Logger.Log("End of Upload file=" + origin_filename);
-        }
+        Cache.remote_manager_.UploadChunk(
+            new FileChunk(data, is_end, chunk_id));
       }
       file.close();
       // install to be available new reader version
       int install_version_id = writer_version.version_;
+      if (GetReaderVersionId() >= INITIAL_VERSION) {
+        // there is existing reader version to be overwritten
+        Version reader_version = GetReaderVersion();
+        if (reader_version.GetRefCount() == NON_REFERENCE) {
+          // there will be no one able to point to this reader version anymore
+          Cache.EvictCacheEntry(reader_version);
+          version_map_.remove(reader_version.version_);
+        }
+      }
       SetReaderVersionId(install_version_id);
-      // should not remove this version from map, future reader need it
+      // should not remove this versilename, server_timestamp);on from map,
+      // future reader need it
       Cache.UpdateTimestamp(origin_filename, server_timestamp);
 
     } catch (Exception e) {
@@ -216,48 +240,27 @@ class FileRecord {
     }
   }
 
-  public int IncrementLatestVersionId() {
-    return ++latest_version_;
-  }
-  public int GetLatestVersionId() {
-    return latest_version_;
-  }
+  public int IncrementLatestVersionId() { return ++latest_version_; }
+  public int GetLatestVersionId() { return latest_version_; }
 
-  public int GetReaderVersionId() {
-    return reader_version_;
-  }
+  public int GetReaderVersionId() { return reader_version_; }
 
   public Version GetReaderVersion() {
     return version_map_.get(reader_version_);
   }
   public void SetReaderVersionId(int new_reader_version) {
-    int old_reader_version_ = reader_version_;
-    if (old_reader_version_ != new_reader_version && GetReaderVersion() != null
-        && GetReaderVersion().GetRefCount() == 0) {
-      // #TODO: no one refers to old reader version, could do some clean up
-    }
     reader_version_ = new_reader_version;
   }
 
   /**
    * copy the file specified by src_name into a new file named by dest_name
    */
-  public static void CopyFile(String dest_name, String src_name) throws Exception {
+  public static void CopyFile(String dest_name, String src_name)
+      throws Exception {
     File src = new File(src_name);
     File dest = new File(dest_name);
-    Files.copy(src.toPath(), dest.toPath(), StandardCopyOption.REPLACE_EXISTING);
-  }
-
-  /**
-   * delete a file specified by the name
-   */
-  public static void DeleteFile(String name) {
-    File file = new File(name);
-    try {
-      boolean success = file.delete();
-    } catch (Exception e) {
-      e.printStackTrace();
-    }
+    Files.copy(src.toPath(), dest.toPath(),
+               StandardCopyOption.REPLACE_EXISTING);
   }
 }
 
@@ -272,7 +275,8 @@ public class Cache {
   public static FileManagerRemote remote_manager_; // to communicate with Server
   private static final HashMap<String, Long> timestamp_map_ = new HashMap<>();
   private int cache_fd_;
-  private final HashMap<String, FileRecord> record_map_;
+  private static final HashMap<String, FileRecord> record_map_ =
+      new HashMap<>();
   private final HashMap<Integer, RandomAccessFile> fd_handle_map_;
   private final HashMap<Integer, String> fd_filename_map_;
 
@@ -280,13 +284,27 @@ public class Cache {
 
   private final HashMap<Integer, FileHandling.OpenOption> fd_option_map_;
 
+  /* the lru freshness ordering of all versions of cached file in this local
+   * Cache Proxy */
+  public final static LinkedHashSet<Version> lru_ = new LinkedHashSet<>();
+
+  private static Long cache_occupancy_ = 0L;
+
+  private static Long cache_capacity_ = 0L;
+
   private final ReentrantLock mtx_;
 
+  private static final int ZERO = 0;
+
+  private static final int SUCCESS = 0;
+
+  private static final int FAILURE = -1;
+
+  private final static ReentrantLock cache_mtx_ = new ReentrantLock();
   private static String cache_dir_;
 
   public Cache() {
     cache_fd_ = INIT_FD;
-    record_map_ = new HashMap<>();
     fd_handle_map_ = new HashMap<>();
     fd_filename_map_ = new HashMap<>();
     fd_version_map_ = new HashMap<>();
@@ -298,19 +316,139 @@ public class Cache {
     timestamp_map_.put(path, timestamp);
   }
 
-  /* set the cache root directory for disk storage */
-  public void SetCacheDirectory(String cache_dir) {
-    cache_dir_ = cache_dir;
+  public void SetCacheCapacity(Long capacity) { cache_capacity_ = capacity; }
+
+  public long GetCacheOccupancy() { return cache_occupancy_; }
+
+  /*
+     register/update a whole filepath into the LRU cache
+     size update should be done separately
+   */
+  public static void HitFileInLRUCache(Version file_version) {
+    // try remove first to update its freshness position
+    RemoveFileFromLRUCache(file_version);
+    lru_.add(file_version);
   }
+
+  public static void RemoveFileFromLRUCache(Version file_version) {
+    lru_.remove(file_version);
+  }
+
+  public static void IncreaseCacheOccupancy(Long size) {
+    cache_occupancy_ += size;
+  }
+
+  public static void DecreaseCacheOccupancy(Long size) {
+    cache_occupancy_ -= size;
+  }
+
+  /* Reserve a certain space from cache
+     Upon success, 'size' space will be reserved for the caller to use and
+     return True If no space is available, it will try evict a few other entries
+     if possible
+
+     However, if all entries are in use, or not space available possible
+     (resever ~100GB file) It returns False
+   */
+  public static boolean ReserveCacheSpace(Long size, boolean should_lock) {
+    if (should_lock) {
+      cache_mtx_.lock();
+    }
+    try {
+      long remain = cache_capacity_ - cache_occupancy_;
+      if (remain >= size) {
+        IncreaseCacheOccupancy(size);
+        return true;
+      }
+      // current remain space is not enough, need to evict
+      while (EvictOneCacheEntry()) {
+        remain = cache_capacity_ - cache_occupancy_;
+        if (remain >= size) {
+          IncreaseCacheOccupancy(size);
+          return true;
+        }
+      }
+      return false;
+    } finally {
+      if (should_lock) {
+        cache_mtx_.unlock();
+      }
+    }
+  }
+
+  /* Remove a specific file version from both disk and cache entry
+     typically happens when pruning so that no client will ever see a stale
+     cached version of a file
+   */
+  public static void EvictCacheEntry(Version file_version) {
+    String full_path = Cache.FormatPath(file_version.ToFileName());
+    lru_.remove(file_version);
+    DecreaseCacheOccupancy(DeleteFile(full_path));
+    FileRecord record = record_map_.get(file_version.filename_);
+    if (record.GetReaderVersionId() == file_version.version_) {
+      // the reader version is masked off
+      record_map_.get(file_version.filename_)
+          .SetReaderVersionId(FileRecord.NON_EXIST_VERSION);
+      UpdateTimestamp(file_version.ToFileName(), CACHE_NO_EXIST);
+    }
+  }
+
+  /* Try to evict one entry from LRU Cache by LRU policy
+     if no entry can be removed, return False
+   */
+  public static boolean EvictOneCacheEntry() {
+    if (lru_.isEmpty()) {
+      return false;
+    }
+    for (Version file_version : lru_) {
+      if (file_version.GetRefCount() > FileRecord.NON_REFERENCE) {
+        // some other clients are using it, cannot evcit yet
+        continue;
+      }
+      String full_path = Cache.FormatPath(file_version.ToFileName());
+      int reader_version_id =
+          record_map_.get(file_version.filename_).GetReaderVersionId();
+      lru_.remove(file_version);
+      if (reader_version_id == file_version.version_) {
+        // the reader version is masked off
+        record_map_.get(file_version.filename_)
+            .SetReaderVersionId(FileRecord.NON_EXIST_VERSION);
+        UpdateTimestamp(file_version.ToFileName(), CACHE_NO_EXIST);
+      }
+      long freed_space = DeleteFile(full_path);
+      DecreaseCacheOccupancy(freed_space);
+      return true;
+    }
+    return false;
+  }
+
+  /* set the cache root directory for disk storage */
+  public void SetCacheDirectory(String cache_dir) { cache_dir_ = cache_dir; }
 
   /* add the handler to enable communicating with Server */
   public void AddRemoteFileManager(FileManagerRemote remote_manager) {
     this.remote_manager_ = remote_manager;
   }
 
+  /**
+   * delete a file specified by the name
+   * and return the deleted file's size for adjusting cache storage
+   */
+  public static long DeleteFile(String name) {
+    File file = new File(name);
+    try {
+      long size = file.length();
+      boolean success = file.delete();
+      return size;
+    } catch (Exception e) {
+      e.printStackTrace();
+    }
+    return SUCCESS;
+  }
+
   /* do book-keeping after a successful open */
-  public int Register(
-      String filename, RandomAccessFile file_handle, int version, FileHandling.OpenOption option) {
+  public int Register(String filename, RandomAccessFile file_handle,
+                      int version, FileHandling.OpenOption option) {
     // generate a fd for this register request
     int fd = cache_fd_++;
     // register book-keeping
@@ -322,13 +460,18 @@ public class Cache {
   }
 
   /* after making sure we can access and open this file, make such a request */
-  public OpenReturnVal GetAndRegisterFile(
-      FileRecord record, String path, FileHandling.OpenOption option) throws Exception {
+  public OpenReturnVal GetAndRegisterFile(FileRecord record, String path,
+                                          FileHandling.OpenOption option)
+      throws Exception {
     FileReturnVal return_val;
     if (option == FileHandling.OpenOption.READ) {
       return_val = record.GetReaderFile();
     } else {
       return_val = record.GetWriterFile();
+      if (return_val.version_ == FileHandling.Errors.ENOMEM) {
+        // no available space to make a writer copy
+        return new OpenReturnVal(null, FileHandling.Errors.ENOMEM, false);
+      }
     }
     RandomAccessFile file_handle = return_val.file_handle_;
     int version = return_val.version_;
@@ -337,7 +480,9 @@ public class Cache {
     return new OpenReturnVal(file_handle, fd, false);
   }
 
-  /* Upon closing a fd, remove it from mapping record */
+  /* Upon closing a fd, remove it from mapping record and upload to server new
+   * version of necessary
+   */
   public void DeregisterFile(int fd) throws Exception {
     RandomAccessFile file_handle = fd_handle_map_.get(fd);
     int version_id = fd_version_map_.get(fd);
@@ -347,11 +492,13 @@ public class Cache {
     file_handle.close();
     // need to physically close this file
     // before make it visible to other threads
+    mtx_.lock();
     if (option == FileHandling.OpenOption.READ) {
       record.CloseReaderFile(version_id);
     } else {
       record.CloseWriterFile(version_id);
     }
+    mtx_.unlock();
     fd_handle_map_.remove(fd);
     fd_version_map_.remove(fd);
     fd_option_map_.remove(fd);
@@ -364,85 +511,134 @@ public class Cache {
   }
 
   /* save a file transferred from server into local cache directory */
-  private void SaveData(String path, FileChunk chunk, Long server_timestamp) {
+  private boolean SaveData(String path, FileChunk chunk,
+                           Long server_timestamp) {
     try {
       FileRecord record = record_map_.get(path);
       if (record == null) {
-        record = new FileRecord(path, -1, -1);
+        record = new FileRecord(path, FileRecord.NON_EXIST_VERSION,
+                                FileRecord.NON_EXIST_VERSION);
         record_map_.put(path, record);
+      } else {
+        // check if there is an available reader version for this file
+        // if so, actively evict it since we know it's stale and are downloading
+        // a new version
+        if (record.GetReaderVersionId() >= FileRecord.INITIAL_VERSION) {
+          Version curr_reader_version = record.GetReaderVersion();
+          if (curr_reader_version.GetRefCount() == FileRecord.INITIAL_VERSION) {
+            Cache.EvictCacheEntry(curr_reader_version);
+            record.version_map_.remove(curr_reader_version.version_);
+            record.SetReaderVersionId(FileRecord.NON_EXIST_VERSION);
+          }
+        }
       }
       int version_id = record.IncrementLatestVersionId();
       Version version = new Version(path, version_id);
       record.version_map_.put(version_id, version);
+      version.PlusRefCount(); // act as a client temporarily, no evict on this
+                              // version
+      HitFileInLRUCache(version);
 
       String cache_path = FormatPath(version.ToFileName());
-      assert (cache_path.startsWith(cache_dir_) && chunk != null);
+      File directory =
+          new File(new File(cache_path).getParentFile().getAbsolutePath());
+      directory.mkdirs();
       RandomAccessFile file = new RandomAccessFile(cache_path, WRITER_MODE);
-      file.setLength(0); // clear off content
-      int loop_id = 0;
+      file.setLength(ZERO); // clear off content
       while (true) {
-        loop_id++;
+        // while downloading this chunk, reserve space from Cache
+        boolean success = ReserveCacheSpace((long)chunk.data.length, false);
+        if (!success) {
+          // cannot store this big file into cache space
+          version.MinusRefCount();
+          EvictCacheEntry(version); // deallocate space
+          record.version_map_.remove(version_id);
+          if (!chunk.end_of_file) {
+            // server side holds a reader lock for you, cancel it
+            remote_manager_.CancelChunk(chunk.chunk_id);
+          }
+          return false;
+        }
         file.write(chunk.data);
-        Logger.Log(
-            "Download file=" + path + " of chunk_size=" + chunk.data.length + " iter=" + loop_id);
         if (chunk.end_of_file) {
-          Logger.Log("End of Download file=" + path);
           break;
         } else {
           chunk = remote_manager_.DownloadChunk(chunk.chunk_id);
         }
       }
+      version.MinusRefCount(); // finish writing into this file
       file.close();
-      UpdateTimestamp(path, server_timestamp); // save the server timestamp for original path
-      record.SetReaderVersionId(version_id); // make this version available to clients
+      UpdateTimestamp(
+          path,
+          server_timestamp); // save the server timestamp for original path
+      record.SetReaderVersionId(
+          version_id); // make this version available to clients
+      return true;
     } catch (Exception e) {
       e.printStackTrace();
     }
+    return true;
   }
 
   /**
    * Proxy delegate the open functionality to cache
-   * and cache make local disk operations based on check-on-use results from the server
-   * it should properly handle Exception and return corresponding error code if applicable
+   * and cache make local disk operations based on check-on-use results from the
+   * server it should properly handle Exception and return corresponding error
+   * code if applicable
    */
   public OpenReturnVal open(String path, FileHandling.OpenOption option) {
-    mtx_.lock();
+    boolean locked = false;
     try {
-      long cache_file_timestamp = timestamp_map_.getOrDefault(path, CACHE_NO_EXIST);
+      long cache_file_timestamp =
+          timestamp_map_.getOrDefault(path, CACHE_NO_EXIST);
       /* send validation request to server */
-      ValidateResult validate_result =
-          remote_manager_.Validate(new ValidateParam(path, option, cache_file_timestamp));
+      ValidateResult validate_result = remote_manager_.Validate(
+          new ValidateParam(path, option, cache_file_timestamp));
       int error_code = validate_result.error_code;
       boolean if_directory = validate_result.is_directory;
       if (error_code == FileHandling.Errors.ENOENT) {
         // currently no available version
         FileRecord record = record_map_.get(path);
         if (record != null) {
-          record.SetReaderVersionId(-1);
+          record.SetReaderVersionId(FileRecord.NON_EXIST_VERSION);
           timestamp_map_.remove(path);
         }
       }
-      if (error_code < 0) { // server already checks error for proxy
+      if (error_code < SUCCESS) { // server already checks error for proxy
         return new OpenReturnVal(null, error_code, if_directory);
       }
-      long server_file_timestamp = validate_result.timestamp;
-      FileChunk file_chunk = validate_result.chunk;
-      if (cache_file_timestamp != server_file_timestamp && server_file_timestamp >= 0
-          && file_chunk != null) {
-        // new content is updated from the server side, save it
-        // iteratively ask for more chunks from server until EOF
-        SaveData(path, file_chunk, server_file_timestamp);
-      }
-
       if (if_directory) {
         // the dummy read directory command
         return new OpenReturnVal(null, cache_fd_++, if_directory);
       }
+      mtx_.lock();
+      locked = true;
+      long server_file_timestamp = validate_result.timestamp;
+      FileChunk file_chunk = validate_result.chunk;
+      if (server_file_timestamp >= Server.SERVER_NO_EXIST &&
+          file_chunk != null) {
+        if (timestamp_map_.getOrDefault(path, CACHE_NO_EXIST) ==
+            server_file_timestamp) {
+          // someone else already downloaded for us meanwhile
+          if (!file_chunk.end_of_file) {
+            // server is holding a lock for this file, no need
+            remote_manager_.CancelChunk(file_chunk.chunk_id);
+          }
+        } else {
+          // new content is updated from the server side, save it
+          // iteratively ask for more chunks from server until EOF
+          boolean success = SaveData(path, file_chunk, server_file_timestamp);
+          if (!success) {
+            return new OpenReturnVal(null, FileHandling.Errors.ENOMEM,
+                                     if_directory);
+          }
+        }
+      }
       // create new entry in the record map if necessary
       FileRecord record = record_map_.get(path);
       if (record == null) {
-        int init_version = -1;
-        record = new FileRecord(path, init_version, init_version);
+        record = new FileRecord(path, FileRecord.NON_EXIST_VERSION,
+                                FileRecord.NON_EXIST_VERSION);
         record_map_.put(path, record);
       }
       return GetAndRegisterFile(record, path, option);
@@ -457,39 +653,55 @@ public class Cache {
     } catch (Exception e) {
       e.printStackTrace();
     } finally {
-      mtx_.unlock();
+      if (locked) {
+        mtx_.unlock();
+      }
     }
     // dummy placeholder for uncaught unknown exception
     return new OpenReturnVal(null, EIO, false);
   }
 
+  /**
+   * Close a file descriptor and potentially upload new modification to Server
+   */
   public int close(int fd) {
-    mtx_.lock();
+    if (!fd_handle_map_.containsKey(fd)) {
+      return FileHandling.Errors.EBADF;
+    }
     try {
-      if (!fd_handle_map_.containsKey(fd)) {
-        return FileHandling.Errors.EBADF;
-      }
-      DeregisterFile(fd); // include upload file to server
-      return 0;
+      DeregisterFile(fd); // include upload file to server and cache pruning
+      return SUCCESS;
     } catch (Exception e) {
       e.printStackTrace();
-    } finally {
-      mtx_.unlock();
     }
-    return -1; // indicate any other form of error
+    return FAILURE; // indicate any other form of error
   }
 
+  /**
+   * Remove a file by signaling to Server such intent
+   */
   public int unlink(String path) {
-    mtx_.lock();
     try {
       int code = remote_manager_.Delete(path);
-      if (code == 0) {
+      if (code == SUCCESS) {
         // delete on server side is successful
+        mtx_.lock();
         FileRecord record = record_map_.get(path);
         if (record != null) {
-          record.SetReaderVersionId(-1);
+          record.SetReaderVersionId(FileRecord.NON_EXIST_VERSION);
           timestamp_map_.remove(path);
+          ArrayList<Version> evict_candidates = new ArrayList<>();
+          for (Version v : record.version_map_.values()) {
+            if (v.GetRefCount() == FileRecord.NON_REFERENCE) {
+              // no one is currently using this version and its whole deleted
+              evict_candidates.add(v);
+            }
+          }
+          for (Version v : evict_candidates) {
+            EvictCacheEntry(v);
+          }
         }
+        mtx_.unlock();
       }
       return code;
     } catch (SecurityException e) {
@@ -497,8 +709,6 @@ public class Cache {
       return FileHandling.Errors.EPERM;
     } catch (Exception e) {
       e.printStackTrace();
-    } finally {
-      mtx_.unlock();
     }
     return EIO; // indicate any other form of error
   }
