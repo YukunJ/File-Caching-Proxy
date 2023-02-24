@@ -14,6 +14,10 @@ import java.rmi.Remote;
 import java.rmi.RemoteException;
 import java.rmi.server.ServerNotActiveException;
 
+/*
+  The interface shared between Proxy and Server
+  See detailed implementation in Server.Java
+ */
 public interface FileManagerRemote extends Remote {
   public static final String SERVER_NAME = "FileServer";
 

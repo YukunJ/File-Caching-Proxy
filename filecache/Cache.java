@@ -381,7 +381,6 @@ public class Cache {
    */
   public static void EvictCacheEntry(Version file_version) {
     String full_path = Cache.FormatPath(file_version.ToFileName());
-    assert (lru_.contains(file_version) && new File(full_path).exists());
     lru_.remove(file_version);
     DecreaseCacheOccupancy(DeleteFile(full_path));
     FileRecord record = record_map_.get(file_version.filename_);
@@ -435,7 +434,6 @@ public class Cache {
    */
   public static long DeleteFile(String name) {
     File file = new File(name);
-    assert (file.exists());
     try {
       long size = file.length();
       boolean success = file.delete();
@@ -532,7 +530,6 @@ public class Cache {
       HitFileInLRUCache(version);
 
       String cache_path = FormatPath(version.ToFileName());
-      assert (cache_path.startsWith(cache_dir_) && chunk != null);
       File directory = new File(new File(cache_path).getParentFile().getAbsolutePath());
       directory.mkdirs();
       RandomAccessFile file = new RandomAccessFile(cache_path, WRITER_MODE);
