@@ -76,7 +76,8 @@ class Proxy {
      * to Server if any
      */
     public int close(int fd) {
-      if (!fd_filehandle_map_.containsKey(fd) && !fd_directory_set_.contains(fd)) {
+      if (!fd_filehandle_map_.containsKey(fd) &&
+          !fd_directory_set_.contains(fd)) {
         return FileHandling.Errors.EBADF;
       }
       if (fd_filehandle_map_.containsKey(fd)) {
@@ -102,20 +103,24 @@ class Proxy {
      * more space from the Proxy's Cache
      */
     public long write(int fd, byte[] buf) {
-      if (!fd_filehandle_map_.containsKey(fd) || fd_directory_set_.contains(fd)) {
+      if (!fd_filehandle_map_.containsKey(fd) ||
+          fd_directory_set_.contains(fd)) {
         // non-existing or write to a directory fd both give EBADF
         return FileHandling.Errors.EBADF;
       }
-      if (fd_filehandle_map_.containsKey(fd) && fd_option_map_.get(fd) == OpenOption.READ) {
+      if (fd_filehandle_map_.containsKey(fd) &&
+          fd_option_map_.get(fd) == OpenOption.READ) {
         // no permission to write to a read-only file
         return FileHandling.Errors.EBADF;
       }
       RandomAccessFile file_handle = fd_filehandle_map_.get(fd);
       try {
-        long advance_size = file_handle.getFilePointer() + (long) buf.length - file_handle.length();
+        long advance_size = file_handle.getFilePointer() + (long)buf.length -
+                            file_handle.length();
         if (advance_size > 0) {
-          // exceed the current size of file, need to reserve space from cache disk
-          boolean success = Cache.ReserveCacheSpace(advance_size, true);
+          // exceed the current size of file, need to reserve space from cache
+          // disk
+          boolean success = Cache.ReserveCacheSpace(advance_size, false);
           if (!success) {
             // exceed storage limit
             return Errors.ENOMEM;
@@ -160,7 +165,8 @@ class Proxy {
      * Lseek could be done without communcation with Server
      */
     public long lseek(int fd, long pos, LseekOption o) {
-      if (!fd_filehandle_map_.containsKey(fd) || fd_directory_set_.contains(fd)) {
+      if (!fd_filehandle_map_.containsKey(fd) ||
+          fd_directory_set_.contains(fd)) {
         return Errors.EBADF;
       }
       RandomAccessFile file_handle = fd_filehandle_map_.get(fd);
@@ -208,22 +214,22 @@ class Proxy {
   }
 
   private static class FileHandlingFactory implements FileHandlingMaking {
-    public FileHandling newclient() {
-      return new FileHandler();
-    }
+    public FileHandling newclient() { return new FileHandler(); }
   }
 
   public static void main(String[] args)
       throws IOException, NotBoundException, ServerNotActiveException {
-    System.out.printf("Proxy Starts with port=%s and pin=%s\n", System.getenv("proxyport15440"),
-        System.getenv("pin15440"));
+    System.out.printf("Proxy Starts with port=%s and pin=%s\n",
+                      System.getenv("proxyport15440"),
+                      System.getenv("pin15440"));
     String server_address = args[0];
     String server_port = args[1];
     String cache_dir = args[2];
     Long cache_capacity = Long.parseLong(args[3]);
-    String server_lookup = Slash + Slash + server_address + Colon + server_port + Slash
-        + FileManagerRemote.SERVER_NAME;
-    FileManagerRemote remote_manager = (FileManagerRemote) Naming.lookup(server_lookup);
+    String server_lookup = Slash + Slash + server_address + Colon +
+                           server_port + Slash + FileManagerRemote.SERVER_NAME;
+    FileManagerRemote remote_manager =
+        (FileManagerRemote)Naming.lookup(server_lookup);
     Proxy.cache.SetCacheDirectory(cache_dir);
     Proxy.cache.SetCacheCapacity(cache_capacity);
     Proxy.cache.AddRemoteFileManager(remote_manager);

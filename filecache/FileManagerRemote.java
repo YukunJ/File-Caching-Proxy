@@ -23,9 +23,11 @@ public interface FileManagerRemote extends Remote {
 
   public ValidateResult Validate(ValidateParam param) throws RemoteException;
 
-  public FileChunk DownloadChunk(Integer chunk_id) throws RemoteException, IOException;
+  public FileChunk DownloadChunk(Integer chunk_id)
+      throws RemoteException, IOException;
 
-  public Long[] Upload(String path, FileChunk chunk) throws RemoteException, IOException;
+  public Long[] Upload(String path, FileChunk chunk)
+      throws RemoteException, IOException;
 
   public void UploadChunk(FileChunk chunk) throws RemoteException, IOException;
 

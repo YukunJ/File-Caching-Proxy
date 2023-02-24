@@ -7,7 +7,8 @@
  * about the version validation of a file open request
  *
  * if the proxy version is stale, server will supply the fresh
- * file in this return value, along with existence/directory/read/write permission flags, etc
+ * file in this return value, along with existence/directory/read/write
+ * permission flags, etc
  * */
 
 import java.io.Serializable;
@@ -19,11 +20,13 @@ public class ValidateParam implements Serializable {
   FileHandling.OpenOption option;
 
   /* send back the timestamp for this file, so that server could decide
-  if Proxy is holding a stale version and sends the Proxy updated version accordingly
+  if Proxy is holding a stale version and sends the Proxy updated version
+  accordingly
    */
   long proxy_timestamp;
 
-  public ValidateParam(String path, FileHandling.OpenOption option, long proxy_timestamp) {
+  public ValidateParam(String path, FileHandling.OpenOption option,
+                       long proxy_timestamp) {
     this.path = path;
     this.option = option;
     this.proxy_timestamp = proxy_timestamp;

@@ -20,5 +20,6 @@ public interface FileChecker {
 
   public boolean IfCanWrite(String path);
 
-  public ValidateResult Validate(String path, FileHandling.OpenOption option, long timestamp);
+  public ValidateResult Validate(String path, FileHandling.OpenOption option,
+                                 long timestamp);
 }

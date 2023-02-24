@@ -7,9 +7,6 @@
  * It implements the FileManagerRemote interface and provide
  * session semantics to its client
  * */
-
-import static java.lang.Thread.sleep;
-
 import java.io.File;
 import java.io.IOException;
 import java.io.RandomAccessFile;
@@ -20,10 +17,12 @@ import java.rmi.RemoteException;
 import java.rmi.registry.*;
 import java.rmi.server.UnicastRemoteObject;
 import java.util.HashMap;
-import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+
+/* Remote File Server meeting session-semantics and check-on-use cache
+ * consistent policy */
 public class Server extends UnicastRemoteObject implements FileManagerRemote {
   public enum LOCK_MODE {
     READ,
@@ -72,9 +71,8 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
       boolean if_can_read = IfCanRead(path);
       boolean if_can_write = IfCanWrite(path);
       // aggregate all error cases across open mode
-      if (!if_exist
-          && (option != FileHandling.OpenOption.CREATE
-              && option != FileHandling.OpenOption.CREATE_NEW)) {
+      if (!if_exist && (option != FileHandling.OpenOption.CREATE &&
+                        option != FileHandling.OpenOption.CREATE_NEW)) {
         // the requested file not found
         return FileHandling.Errors.ENOENT;
       }
@@ -96,7 +94,8 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
       }
       if (!if_regular) {
         // not a regular file
-        if (option == FileHandling.OpenOption.READ || option == FileHandling.OpenOption.WRITE) {
+        if (option == FileHandling.OpenOption.READ ||
+            option == FileHandling.OpenOption.WRITE) {
           return FileHandling.Errors.EPERM;
         }
         if (if_exist && option == FileHandling.OpenOption.CREATE) {
@@ -131,16 +130,17 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
      * if needed, transfer newest version of the file to Proxy
      */
     @Override
-    public ValidateResult Validate(String path, FileHandling.OpenOption option, long timestamp) {
+    public ValidateResult Validate(String path, FileHandling.OpenOption option,
+                                   long timestamp) {
       GrabLock(path, LOCK_MODE.READ); // lock in reader mode
-      long server_file_timestamp = file_to_timestamp_map_.getOrDefault(path, SERVER_NO_EXIST);
+      long server_file_timestamp =
+          file_to_timestamp_map_.getOrDefault(path, SERVER_NO_EXIST);
       int error_code = ErrorCheck(path, option);
-      ValidateResult res = new ValidateResult(error_code, IfDirectory(path), server_file_timestamp);
-      if (error_code == SUCCESS && server_file_timestamp != SERVER_NO_EXIST
-          && (timestamp != server_file_timestamp
-              || new File(path).lastModified() != file_to_last_modified_.get(path))) {
+      ValidateResult res = new ValidateResult(error_code, IfDirectory(path),
+                                              server_file_timestamp);
+      if (error_code == SUCCESS && server_file_timestamp != SERVER_NO_EXIST &&
+          timestamp != server_file_timestamp) {
         // the server shall provide updated version to proxy
-        file_to_last_modified_.put(path, new File(path).lastModified());
         FileChunk chunk = LoadFile(path);
         res.CarryChunk(chunk);
       } else {
@@ -154,7 +154,7 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
       try {
         Integer chunk_id = file_chunk_id++;
         RandomAccessFile f = new RandomAccessFile(path, READER_MODE);
-        Integer whole_file_size = (int) f.length();
+        Integer whole_file_size = (int)f.length();
         Integer max_chunk_size = FileChunk.CHUNK_SIZE;
         Integer chunk_size = Math.min(whole_file_size, max_chunk_size);
         byte[] data = new byte[chunk_size];
@@ -221,7 +221,6 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
   private Integer file_chunk_id = 0;
   private final HashMap<Integer, RandomAccessFile> file_download_chunk_map_;
 
-  private final HashMap<String, Long> file_to_last_modified_;
   private final HashMap<Integer, RandomAccessFile> file_upload_chunk_map_;
   private long timestamp_ = 0;
   public final String READER_MODE = "r";
@@ -246,7 +245,6 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
     super(0);
     mtx_ = new ReentrantLock();
     file_to_lock_ = new HashMap<>();
-    file_to_last_modified_ = new HashMap<>();
     chunk_id_to_file_ = new HashMap<>();
     file_to_timestamp_map_ = new HashMap<>();
     file_download_chunk_map_ = new HashMap<>();
@@ -264,8 +262,8 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
     String path = FormatPath(param.path);
     if (path.startsWith(BACKWARD)) {
       // access out of root directory
-      return new ValidateResult(
-          FileHandling.Errors.EPERM, checker_.IfDirectory(path), SERVER_NO_EXIST);
+      return new ValidateResult(FileHandling.Errors.EPERM,
+                                checker_.IfDirectory(path), SERVER_NO_EXIST);
     }
     FileHandling.OpenOption option = param.option;
     long validation_timestamp = param.proxy_timestamp;
@@ -278,11 +276,12 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
      to make sure no one uploads a new version in the middle of downloading
    */
   @Override
-  public FileChunk DownloadChunk(Integer chunk_id) throws IOException, RemoteException {
+  public FileChunk DownloadChunk(Integer chunk_id)
+      throws IOException, RemoteException {
     RandomAccessFile f = file_download_chunk_map_.get(chunk_id);
     long curr_pos = f.getFilePointer();
     long total_len = f.length();
-    Integer file_remain_length = (int) (total_len - curr_pos);
+    Integer file_remain_length = (int)(total_len - curr_pos);
     Integer max_chunk_size = FileChunk.CHUNK_SIZE;
     Integer chunk_size = Math.min(file_remain_length, max_chunk_size);
     byte[] data = new byte[chunk_size];
@@ -302,17 +301,17 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
    * may subsequentlly call upload_chunk if too big a file
    */
   @Override
-  public Long[] Upload(String path, FileChunk chunk) throws RemoteException, IOException {
+  public Long[] Upload(String path, FileChunk chunk)
+      throws RemoteException, IOException {
     path = FormatPath(path);
     GrabLock(path, LOCK_MODE.WRITE);
-    Long chunk_id = (long) file_chunk_id++;
+    Long chunk_id = (long)file_chunk_id++;
     RandomAccessFile file = new RandomAccessFile(path, WRITER_MODE);
     // clear the content of the file if existing
     file.setLength(ZERO);
     file.write(chunk.data);
     if (chunk.end_of_file) {
       file.close();
-      file_to_last_modified_.put(path, new File(path).lastModified());
       ReleaseLock(path, LOCK_MODE.WRITE);
     } else {
       file_upload_chunk_map_.put(chunk_id.intValue(), file);
@@ -336,14 +335,14 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
     if (chunk.end_of_file) {
       file_upload_chunk_map_.remove(chunk.chunk_id);
       chunk_id_to_file_.remove(chunk.chunk_id);
-      file_to_last_modified_.put(full_path, new File(full_path).lastModified());
       ReleaseLock(full_path, LOCK_MODE.WRITE); // writer unlock
     }
   }
 
   /*
-    When the proxy doesn't have enough space, send the cancel chunk request to actively unlock
-    must be a reader lock, writer upload always succeed in terms of storage space
+    When the proxy doesn't have enough space, send the cancel chunk request to
+    actively unlock must be a reader lock, writer upload always succeed in terms
+    of storage space
    */
   @Override
   public void CancelChunk(Integer chunk_id) throws RemoteException {
@@ -372,7 +371,6 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
       boolean success = f.delete();
       if (success) {
         file_to_timestamp_map_.remove(path);
-        file_to_last_modified_.remove(path);
       }
       ReleaseLock(path, LOCK_MODE.WRITE);
       return (success) ? SUCCESS : FileHandling.Errors.EPERM;
@@ -391,7 +389,8 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
     mtx_.lock();
     try {
       File root = new File(root_dir_);
-      ScanVersionHelper(((root.getName().equals(".")) ? "" : root.getName() + Slash), root);
+      ScanVersionHelper(
+          ((root.getName().equals(".")) ? "" : root.getName() + Slash), root);
     } finally {
       mtx_.unlock();
     }
@@ -416,14 +415,14 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
         String full_path = previous_path + f.getName();
         file_to_timestamp_map_.put(full_path, timestamp_++);
         file_to_lock_.put(full_path, new ReentrantReadWriteLock());
-        file_to_last_modified_.put(full_path, f.lastModified());
       } else if (f.isDirectory() && !f.isHidden()) {
         ScanVersionHelper(previous_path + f.getName() + Slash, f);
       }
     }
   }
 
-  public static void main(String[] args) throws RemoteException, MalformedURLException {
+  public static void main(String[] args)
+      throws RemoteException, MalformedURLException {
     int port = Integer.parseInt(args[0]);
     String root_dir = args[1];
     try {
@@ -436,7 +435,8 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
     // create our Server instance (first runs on a random port)
     Server server = new Server(root_dir);
     // add reference to registry so clients can find it using name FileServer
-    String address = "//127.0.0.1:" + args[0] + Slash + FileManagerRemote.SERVER_NAME;
+    String address =
+        "//127.0.0.1:" + args[0] + Slash + FileManagerRemote.SERVER_NAME;
     Naming.rebind(address, server);
   }
 }

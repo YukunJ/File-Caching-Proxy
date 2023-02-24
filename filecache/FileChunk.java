@@ -27,15 +27,9 @@ public class FileChunk implements Serializable {
     this.chunk_id = chunk_id;
   }
 
-  void SetData(byte[] data) {
-    this.data = data;
-  }
+  void SetData(byte[] data) { this.data = data; }
 
-  void SetEndOfFile(boolean end_of_file) {
-    this.end_of_file = end_of_file;
-  }
+  void SetEndOfFile(boolean end_of_file) { this.end_of_file = end_of_file; }
 
-  void SetChunkId(Integer id) {
-    this.chunk_id = id;
-  }
+  void SetChunkId(Integer id) { this.chunk_id = id; }
 }
