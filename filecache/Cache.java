@@ -144,12 +144,15 @@ class FileRecord {
     if (GetReaderVersionId() >= 0) {
       // there is existing version, copy it
       String reader_filename = GetReaderVersion().ToFileName();
+      GetReaderVersion().PlusRefCount(); // temporarily protect this reader file, do not evict
       String cache_reader_filepath = Cache.FormatPath(reader_filename);
       boolean success = Cache.ReserveCacheSpace(new File(cache_reader_filepath).length(), false);
       if (!success) {
+        GetReaderVersion().MinusRefCount();
         return new FileReturnVal(null, FileHandling.Errors.ENOMEM);
       }
       CopyFile(cache_writer_filepath, cache_reader_filepath);
+      GetReaderVersion().MinusRefCount();
       Logger.Log(
           "Make a cache copy from " + cache_reader_filepath + " to " + cache_writer_filepath);
     }
@@ -187,8 +190,8 @@ class FileRecord {
     byte[] data;
     try {
       // must be 0 now
-      assert (writer_version.MinusRefCount() == 0);
-
+      writer_version.MinusRefCount();
+      assert (writer_version.GetRefCount() == 0);
       RandomAccessFile file =
           new RandomAccessFile(Cache.FormatPath(writer_version.ToFileName()), Cache.READER_MODE);
       Integer max_chunk_size = FileChunk.CHUNK_SIZE;
@@ -211,8 +214,6 @@ class FileRecord {
         file.read(data);
         Cache.remote_manager_.UploadChunk(new FileChunk(data, is_end, chunk_id));
         loop_id++;
-        Logger.Log(
-            "Upload file=" + origin_filename + " of chunk_size=" + chunk_size + " iter=" + loop_id);
         if (is_end) {
           Logger.Log("End of Upload file=" + origin_filename);
         }
@@ -230,7 +231,7 @@ class FileRecord {
         }
       }
       SetReaderVersionId(install_version_id);
-      // should not remove this version from map, future reader need it
+      // should not remove this versilename, server_timestamp);on from map, future reader need it
       Cache.UpdateTimestamp(origin_filename, server_timestamp);
 
     } catch (Exception e) {
@@ -250,6 +251,7 @@ class FileRecord {
   }
 
   public Version GetReaderVersion() {
+    assert (reader_version_ >= 0);
     return version_map_.get(reader_version_);
   }
   public void SetReaderVersionId(int new_reader_version) {
@@ -401,6 +403,12 @@ public class Cache {
     assert (lru_.contains(file_version) && new File(full_path).exists());
     lru_.remove(file_version);
     DecreaseCacheOccupancy(DeleteFile(full_path));
+    FileRecord record = record_map_.get(file_version.filename_);
+    if (record.GetReaderVersionId() == file_version.version_) {
+      // the reader version is masked off
+      record_map_.get(file_version.filename_).SetReaderVersionId(-1);
+      UpdateTimestamp(file_version.ToFileName(), CACHE_NO_EXIST);
+    }
   }
 
   /* Try to evict one entry from LRU Cache by LRU policy
@@ -417,9 +425,11 @@ public class Cache {
       }
       String full_path = Cache.FormatPath(file_version.ToFileName());
       int reader_version_id = record_map_.get(file_version.filename_).GetReaderVersionId();
+      lru_.remove(file_version);
       if (reader_version_id == file_version.version_) {
         // the reader version is masked off
         record_map_.get(file_version.filename_).SetReaderVersionId(-1);
+        UpdateTimestamp(file_version.ToFileName(), CACHE_NO_EXIST);
       }
       long freed_space = DeleteFile(full_path);
       DecreaseCacheOccupancy(freed_space);
@@ -521,14 +531,28 @@ public class Cache {
       if (record == null) {
         record = new FileRecord(path, -1, -1);
         record_map_.put(path, record);
+      } else {
+        // check if there is an available reader version for this file
+        // if so, actively evict it since we know it's stale and are downloading a new version
+        if (record.GetReaderVersionId() >= 0) {
+          Version curr_reader_version = record.GetReaderVersion();
+          if (curr_reader_version.GetRefCount() == 0) {
+            Cache.EvictCacheEntry(curr_reader_version);
+            record.version_map_.remove(curr_reader_version.version_);
+            record.SetReaderVersionId(-1);
+          }
+        }
       }
       int version_id = record.IncrementLatestVersionId();
       Version version = new Version(path, version_id);
       record.version_map_.put(version_id, version);
+      version.PlusRefCount(); // act as a client temporarily, no evict on this version
       HitFileInLRUCache(version);
 
       String cache_path = FormatPath(version.ToFileName());
       assert (cache_path.startsWith(cache_dir_) && chunk != null);
+      File directory = new File(new File(cache_path).getParentFile().getAbsolutePath());
+      directory.mkdirs();
       RandomAccessFile file = new RandomAccessFile(cache_path, WRITER_MODE);
       file.setLength(0); // clear off content
       int loop_id = 0;
@@ -537,13 +561,17 @@ public class Cache {
         boolean success = ReserveCacheSpace((long) chunk.data.length, false);
         if (!success) {
           // cannot store this big file into cache space
+          version.MinusRefCount();
           EvictCacheEntry(version); // deallocate space
           record.version_map_.remove(version_id);
+          if (!chunk.end_of_file) {
+            // server side holds a reader lock for you, cancel it
+            Logger.Log("Cancel Download Chunk for file=" + cache_path + " at iters=" + loop_id);
+            remote_manager_.CancelChunk(chunk.chunk_id);
+          }
           return false;
         }
         file.write(chunk.data);
-        Logger.Log(
-            "Download file=" + path + " of chunk_size=" + chunk.data.length + " iter=" + loop_id);
         if (chunk.end_of_file) {
           Logger.Log("End of Download file=" + path);
           break;
@@ -551,6 +579,7 @@ public class Cache {
           chunk = remote_manager_.DownloadChunk(chunk.chunk_id);
         }
       }
+      version.MinusRefCount(); // finish writing into this file
       file.close();
       UpdateTimestamp(path, server_timestamp); // save the server timestamp for original path
       record.SetReaderVersionId(version_id); // make this version available to clients
@@ -588,12 +617,12 @@ public class Cache {
       }
       long server_file_timestamp = validate_result.timestamp;
       FileChunk file_chunk = validate_result.chunk;
-      if (cache_file_timestamp != server_file_timestamp && server_file_timestamp >= 0
-          && file_chunk != null) {
+      if (server_file_timestamp >= 0 && file_chunk != null) {
         // new content is updated from the server side, save it
         // iteratively ask for more chunks from server until EOF
         boolean success = SaveData(path, file_chunk, server_file_timestamp);
         if (!success) {
+          Logger.Log("Save data fails");
           return new OpenReturnVal(null, FileHandling.Errors.ENOMEM, if_directory);
         }
       }

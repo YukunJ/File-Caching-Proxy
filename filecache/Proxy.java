@@ -107,7 +107,7 @@ class Proxy {
       }
       RandomAccessFile file_handle = fd_filehandle_map_.get(fd);
       try {
-        long advance_size = file_handle.length() - file_handle.getFilePointer() - (long) buf.length;
+        long advance_size = file_handle.getFilePointer() + (long) buf.length - file_handle.length();
         if (advance_size > 0) {
           // exceed the current size of file, need to reserve space from cache disk
           boolean success = Cache.ReserveCacheSpace(advance_size, true);
@@ -117,6 +117,7 @@ class Proxy {
           }
         }
         file_handle.write(buf);
+        Cache.PrintCache();
         return buf.length;
       } catch (Exception e) {
         e.printStackTrace();

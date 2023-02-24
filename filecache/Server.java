@@ -20,12 +20,13 @@ import java.rmi.RemoteException;
 import java.rmi.registry.*;
 import java.rmi.server.UnicastRemoteObject;
 import java.util.HashMap;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantLock;
-
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 public class Server extends UnicastRemoteObject implements FileManagerRemote {
   /* Server side disk manager to verify the status of a file on service dir */
   class ServerFileChecker implements FileChecker {
-    public final Long SERVER_NO_EXIST = -2L;
     @Override
     public boolean IfExist(String path) {
       return new File(path).exists();
@@ -121,8 +122,10 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
       int error_code = ErrorCheck(path, option);
       ValidateResult res = new ValidateResult(error_code, IfDirectory(path), server_file_timestamp);
       if (error_code == 0 && server_file_timestamp != SERVER_NO_EXIST
-          && timestamp != server_file_timestamp) {
+          && (timestamp != server_file_timestamp
+              || new File(path).lastModified() != file_to_last_modified_.get(path))) {
         // the server shall provide updated version to proxy
+        file_to_last_modified_.put(path, new File(path).lastModified());
         FileChunk chunk = LoadFile(path);
         res.CarryChunk(chunk);
       }
@@ -143,6 +146,9 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
         boolean is_end = (max_chunk_size >= whole_file_size);
         if (!is_end) {
           file_download_chunk_map_.put(chunk_id, f);
+          assert (file_to_lock_.containsKey(path));
+          chunk_id_to_file_.put(chunk_id, path);
+          file_to_lock_.get(path).readLock().lock();
         } else {
           f.close();
         }
@@ -154,16 +160,26 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
     }
   }
 
+  public static final Long SERVER_NO_EXIST = -2L;
+
   private final ReentrantLock mtx_;
+
+  private final HashMap<String, ReadWriteLock> file_to_lock_;
+
+  private final HashMap<Integer, String> chunk_id_to_file_;
+
   private final HashMap<String, Long> file_to_timestamp_map_;
   private Integer file_chunk_id = 0;
   private final HashMap<Integer, RandomAccessFile> file_download_chunk_map_;
 
+  private final HashMap<String, Long> file_to_last_modified_;
   private final HashMap<Integer, RandomAccessFile> file_upload_chunk_map_;
   private long timestamp_ = 0;
   public final String READER_MODE = "r";
   public final String WRITER_MODE = "rw";
   private static final String Slash = "/";
+
+  private static final String BACKWARD = "..";
 
   private final String root_dir_;
 
@@ -171,6 +187,9 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
   public Server(String root_dir) throws RemoteException {
     super(0);
     mtx_ = new ReentrantLock();
+    file_to_lock_ = new HashMap<>();
+    file_to_last_modified_ = new HashMap<>();
+    chunk_id_to_file_ = new HashMap<>();
     file_to_timestamp_map_ = new HashMap<>();
     file_download_chunk_map_ = new HashMap<>();
     file_upload_chunk_map_ = new HashMap<>();
@@ -182,6 +201,11 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
   @Override
   public ValidateResult Validate(ValidateParam param) throws RemoteException {
     String path = FormatPath(param.path);
+    if (path.startsWith(BACKWARD)) {
+      // access out of root directory
+      return new ValidateResult(
+          FileHandling.Errors.EPERM, checker_.IfDirectory(path), SERVER_NO_EXIST);
+    }
     FileHandling.OpenOption option = param.option;
     long validation_timestamp = param.proxy_timestamp;
     Logger.Log(
@@ -209,7 +233,12 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
       f.read(data);
       boolean is_end = (max_chunk_size >= file_remain_length);
       if (is_end) {
+        assert (chunk_id_to_file_.containsKey(chunk_id));
+        String full_path = chunk_id_to_file_.get(chunk_id);
+        assert (file_to_lock_.containsKey(full_path));
+        file_to_lock_.get(full_path).readLock().unlock();
         file_download_chunk_map_.remove(chunk_id);
+        chunk_id_to_file_.remove(chunk_id);
       }
       return new FileChunk(data, is_end, chunk_id);
     } finally {
@@ -224,8 +253,13 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
   public Long[] Upload(String path, FileChunk chunk) throws RemoteException, IOException {
     path = FormatPath(path);
     Logger.Log("Upload Request of path=" + path);
+    // create all parent directories if not exist
     mtx_.lock();
     try {
+      if (!file_to_lock_.containsKey(path)) {
+        // init lock mapping
+        file_to_lock_.put(path, new ReentrantReadWriteLock());
+      }
       Long chunk_id = (long) file_chunk_id++;
       RandomAccessFile file = new RandomAccessFile(path, WRITER_MODE);
       // clear the content of the file if existing
@@ -233,8 +267,11 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
       file.write(chunk.data);
       if (chunk.end_of_file) {
         file.close();
+        file_to_last_modified_.put(path, new File(path).lastModified());
       } else {
         file_upload_chunk_map_.put(chunk_id.intValue(), file);
+        chunk_id_to_file_.put(chunk_id.intValue(), path);
+        file_to_lock_.get(path).writeLock().lock();
       }
       file_to_timestamp_map_.put(path, ++timestamp_);
       Long[] tuple = new Long[2];
@@ -251,14 +288,34 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
     mtx_.lock();
     try {
       assert (file_upload_chunk_map_.containsKey(chunk.chunk_id));
+      assert (chunk_id_to_file_.containsKey(chunk.chunk_id));
+      String full_path = chunk_id_to_file_.get(chunk.chunk_id);
+      assert (file_to_lock_.containsKey(full_path));
       RandomAccessFile f = file_upload_chunk_map_.get(chunk.chunk_id);
       f.write(chunk.data);
       if (chunk.end_of_file) {
         file_upload_chunk_map_.remove(chunk.chunk_id);
+        chunk_id_to_file_.remove(chunk.chunk_id);
+        file_to_lock_.get(full_path).writeLock().unlock(); // writer unlock
+        file_to_last_modified_.put(full_path, new File(full_path).lastModified());
       }
     } finally {
       mtx_.unlock();
     }
+  }
+
+  /*
+    When the proxy doesn't have enough space, send the cancel chunk request to actively unlock
+    must be a reader lock, writer upload always succeed in terms of storage space
+   */
+  @Override
+  public void CancelChunk(Integer chunk_id) throws RemoteException {
+    assert (chunk_id_to_file_.containsKey(chunk_id));
+    String full_path = chunk_id_to_file_.get(chunk_id);
+    assert (file_to_lock_.containsKey(full_path));
+    file_to_lock_.get(full_path).readLock().unlock();
+    chunk_id_to_file_.remove(chunk_id);
+    Logger.Log("Proxy CancelChunk request for file=" + full_path);
   }
 
   /**
@@ -280,6 +337,8 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
       boolean success = f.delete();
       if (success) {
         file_to_timestamp_map_.remove(path);
+        file_to_lock_.remove(path);
+        file_to_last_modified_.remove(path);
       }
       return (success) ? 0 : FileHandling.Errors.EPERM;
     } catch (SecurityException e) {
@@ -324,7 +383,10 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
     assert (directory.isDirectory());
     for (File f : directory.listFiles()) {
       if (f.isFile() && !f.isHidden()) {
-        file_to_timestamp_map_.put(previous_path + f.getName(), timestamp_++);
+        String full_path = previous_path + f.getName();
+        file_to_timestamp_map_.put(full_path, timestamp_++);
+        file_to_lock_.put(full_path, new ReentrantReadWriteLock());
+        file_to_last_modified_.put(full_path, f.lastModified());
       } else if (f.isDirectory() && !f.isHidden()) {
         ScanVersionHelper(previous_path + f.getName() + Slash, f);
       }

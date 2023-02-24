@@ -25,5 +25,7 @@ public interface FileManagerRemote extends Remote {
 
   public void UploadChunk(FileChunk chunk) throws RemoteException, IOException;
 
+  public void CancelChunk(Integer chunk_id) throws RemoteException;
+
   public int Delete(String path) throws RemoteException;
 }

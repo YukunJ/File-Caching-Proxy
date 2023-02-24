@@ -249,9 +249,149 @@ void test_lru_1() {
   unlink("A.txt");
 }
 
+/**
+    @ test basic lru workflow when a writer version covers reader version
+      and only reserve space in write when going out of original file length
+   boundary
+    @ pre: server side has A.txt
+*/
+void test_lru_3() {
+  int fd_write = open("A.txt", O_WRONLY);
+  // since initial pointer is at 0, this write should not reserve space
+  write(fd_write, "abcdefg", 7);
+  // this should reserve 4 bytes
+  write(fd_write, "abcdefg", 7);
+  close(fd_write);
+}
+
+/**
+    @ test basic lru workflow when multiple reader and one writer interact on
+   one single file
+    @ pre: server side has A.txt
+*/
+void test_lru_4() {
+  char buf[20] = {0};
+  int fd_write = open("A.txt", O_WRONLY);
+  int fd_read = open("A.txt", O_RDONLY);
+  write(fd_write, "abcdefghijkl", 12);
+  read(fd_read, buf, 20);
+  printf("original read=%s\n", buf);
+  memset(buf, 0, 20);
+  close(fd_write);
+  close(fd_read);
+
+  int fd_2nd_read = open("A.txt", O_RDONLY);
+  read(fd_2nd_read, buf, 20);
+  printf("second read=%s\n", buf);
+  close(fd_2nd_read);
+}
+
+/*
+    @ piaza: Test: Basic LRU operation (5.5meg cache, 1 meg files)
+ */
+void test_lru_5() {
+  int fd_a, fd_b, fd_c, fd_d, fd_e, fd_f, fd_g;
+  fd_a = open("A.txt", O_RDONLY);
+  close(fd_a);
+  fd_b = open("B.txt", O_RDONLY);
+  close(fd_b);
+  fd_c = open("C.txt", O_RDONLY);
+  close(fd_c);
+
+  wait_prompt("cache should be .A1.B1.C1 at this point");
+
+  fd_b = open("B.txt", O_RDONLY);
+  close(fd_b);
+  fd_d = open("D.txt", O_RDONLY);
+  close(fd_d);
+  fd_e = open("E.txt", O_RDONLY);
+  close(fd_e);
+  fd_b = open("B.txt", O_RDONLY);
+  close(fd_b);
+  wait_prompt("cache should be .A1.B1.C1.D1.E1 at this point");
+
+  fd_f = open("F.txt", O_RDONLY);
+  close(fd_f);
+  fd_g = open("G.txt", O_RDONLY);
+  close(fd_g);
+  wait_prompt("cache should be .B1.D1.E1.F1.G1 at this point");
+
+  wait_prompt("Go and Modify A.txt and F.txt on the server");
+
+  fd_f = open("F.txt", O_RDONLY);
+  close(fd_f);
+  fd_a = open("A.txt", O_RDONLY);
+  close(fd_a);
+  fd_c = open("C.txt", O_RDONLY);
+  close(fd_c);
+
+  wait_prompt("cache should be .A .B .E .F .G at this point");
+}
+
+/*
+    @ piaza: Test: Advanced LRU operation (5.5meg cache, 1 meg files)
+ */
+void test_lru_6() {
+  int fd_a, fd_b, fd_c, fd_d, fd_e, fd_f, fd_g, fd_h;
+  fd_a = open("A.txt", O_RDONLY);
+  wait_prompt("slow read of A happening. cache should be .A at this point");
+
+  fd_b = open("B.txt", O_RDONLY);
+  close(fd_b);
+  fd_c = open("C.txt", O_RDONLY);
+  close(fd_c);
+  fd_d = open("D.txt", O_RDONLY);
+  close(fd_d);
+  fd_e = open("E.txt", O_RDONLY);
+  close(fd_e);
+  fd_f = open("F.txt", O_RDONLY);
+  close(fd_f);
+  fd_g = open("G.txt", O_RDONLY);
+  close(fd_g);
+  fd_h = open("H.txt", O_RDONLY);
+  close(fd_h);
+  wait_prompt(
+      "After read B C D E F G H. cache should be .A .E .F .G .H at this point");
+
+  fd_g = open("G.txt", O_WRONLY);
+  fd_h = open("H.txt", O_WRONLY);
+  wait_prompt(
+      "slow write of G, H happening. cache should be .A .G .Gx .H .Hx at this "
+      "point");
+
+  close(fd_g);
+  close(fd_h);
+  fd_g = open("G.txt", O_RDONLY);
+  close(fd_g);
+  fd_h = open("H.txt", O_RDONLY);
+  close(fd_h);
+  wait_prompt(
+      "slow write of G, H finishes and they are read again. cache should be .A "
+      ".G .H at this point");
+
+  close(fd_a);
+  fd_c = open("C.txt", O_RDONLY);
+  close(fd_c);
+  fd_d = open("D.txt", O_RDONLY);
+  close(fd_d);
+  fd_e = open("E.txt", O_RDONLY);
+  close(fd_e);
+  wait_prompt(
+      "slow read of A finishes and READ C D E. cache should be .C .D .E .G .H "
+      "at this point");
+}
+
+void directory_test0() {
+  int fd = open("ctest1", O_RDWR);
+  write(fd, "abcdefgh", 8);
+  int fd2 = open("ctest1", O_RDONLY);
+  close(fd2);
+  close(fd);
+}
+
 int main(int argc, char* argv[]) {
-  // download 5mb.txt from server
-  test_lru_1();
+  directory_test0();
+
   exit(0);
   int fd_0 = open(argv[1], O_RDWR);
   // write some junk to the end and try upload to server
