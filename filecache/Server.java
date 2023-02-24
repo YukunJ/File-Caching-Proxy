@@ -57,6 +57,10 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
        file back if the validation is failed
      */
     private int ErrorCheck(String path, FileHandling.OpenOption option) {
+      /*
+       * Helper Proxy make decisions of if such a request should succeed
+       * so that could save traffic of transferring a file if request fails
+       */
       boolean if_exist = IfExist(path);
       boolean if_directory = IfDirectory(path);
       boolean if_regular = IfRegularFile(path);
@@ -117,6 +121,10 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
       return SUCCESS; // no error detected
     }
 
+    /**
+     * Validate if Proxy's open request for a file should succeed
+     * if needed, transfer newest version of the file to Proxy
+     */
     @Override
     public ValidateResult Validate(String path, FileHandling.OpenOption option, long timestamp) {
       long server_file_timestamp = file_to_timestamp_map_.getOrDefault(path, SERVER_NO_EXIST);
@@ -208,6 +216,9 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
     InitScanVersion();
   }
 
+  /*
+    Delegate to file_checker to do the real checking mechanism rountine
+   */
   @Override
   public ValidateResult Validate(ValidateParam param) throws RemoteException {
     String path = FormatPath(param.path);
@@ -226,6 +237,11 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
     }
   }
 
+  /*
+     When file is too big, Proxy will continually download file chunk by chunk
+     while doing so, it needs to hold a reader lock for this file
+     to make sure no one uploads a new version in the middle of downloading
+   */
   @Override
   public FileChunk DownloadChunk(Integer chunk_id) throws IOException, RemoteException {
     mtx_.lock();
@@ -256,6 +272,7 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
 
   /**
    * RMI: Upload a file to the server side, requested by proxy
+   * may subsequentlly call upload_chunk if too big a file
    */
   @Override
   public Long[] Upload(String path, FileChunk chunk) throws RemoteException, IOException {
@@ -290,6 +307,9 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
     }
   }
 
+  /**
+   * Upload the speicific chunk of a large file from Proxy to Server
+   */
   @Override
   public void UploadChunk(FileChunk chunk) throws RemoteException, IOException {
     mtx_.lock();
@@ -372,7 +392,8 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
     }
   }
 
-  /* format a proxy-side file address to the server-side file address
+  /*
+   * format a proxy-side file address to the server-side file address
    */
   private String FormatPath(String path) {
     return Paths.get((root_dir_.equals(".") ? "" : root_dir_ + Slash) + path)
@@ -380,6 +401,9 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
         .toString();
   }
 
+  /*
+    Recursive call to scanning the server's initial root directory
+   */
   private void ScanVersionHelper(String previous_path, File directory) {
     // make sure the directory exist
     assert (directory.isDirectory());

@@ -24,7 +24,7 @@ format:
 .PHONY: submit
 submit:
 	# submit by compressing tar
-	tar cvzf ../mysolution.tgz Makefile Server.java Proxy.java Cache.java FileChecker.java FileChunk.java FileManagerRemote.java ValidateResult.java ValidateParam.java
+	tar cvzf ../mysolution.tgz design.pdf Makefile Server.java Proxy.java Cache.java FileChecker.java FileChunk.java FileManagerRemote.java ValidateResult.java ValidateParam.java
 
 # clean up command
 .PHONY: clean

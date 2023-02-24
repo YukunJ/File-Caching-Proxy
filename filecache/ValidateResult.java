@@ -28,6 +28,7 @@ public class ValidateResult implements Serializable {
     this.chunk = null;
   }
 
+  /* may carry a file chunk if Proxy's file version is outdated */
   public void CarryChunk(FileChunk file_chunk) {
     this.chunk = file_chunk;
   }

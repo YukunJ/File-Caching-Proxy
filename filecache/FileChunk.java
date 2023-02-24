@@ -9,9 +9,13 @@
 
 import java.io.Serializable;
 
+/**
+ * File Chunk used when uploading/downloading a large file from Server
+ * to avoid large RPC call messages on the fly
+ */
 public class FileChunk implements Serializable {
-  /* 100KB tunable chunk size by default */
-  public static Integer CHUNK_SIZE = 100 * 1024;
+  /* 200KB tunable chunk size by default */
+  public static Integer CHUNK_SIZE = 200 * 1024;
 
   byte[] data = null;
   boolean end_of_file;

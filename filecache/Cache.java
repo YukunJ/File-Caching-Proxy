@@ -176,7 +176,6 @@ class FileRecord {
     if (remain_ref_count == NON_REFERENCE && version_id != GetReaderVersionId()) {
       // no more client will see this version
       // version_map_.remove(version_id);
-      // TODO: remove this version's associated disk file to clear cache space
       version_map_.remove(version_id);
       Cache.EvictCacheEntry(reader_version);
     }
@@ -480,7 +479,8 @@ public class Cache {
     return new OpenReturnVal(file_handle, fd, false);
   }
 
-  /* Upon closing a fd, remove it from mapping record */
+  /* Upon closing a fd, remove it from mapping record and upload to server new version of necessary
+   */
   public void DeregisterFile(int fd) throws Exception {
     RandomAccessFile file_handle = fd_handle_map_.get(fd);
     int version_id = fd_version_map_.get(fd);
@@ -538,6 +538,7 @@ public class Cache {
       RandomAccessFile file = new RandomAccessFile(cache_path, WRITER_MODE);
       file.setLength(ZERO); // clear off content
       while (true) {
+        // while downloading this chunk, reserve space from Cache
         boolean success = ReserveCacheSpace((long) chunk.data.length, false);
         if (!success) {
           // cannot store this big file into cache space
@@ -632,6 +633,9 @@ public class Cache {
     return new OpenReturnVal(null, EIO, false);
   }
 
+  /**
+   * Close a file descriptor and potentially upload new modification to Server
+   */
   public int close(int fd) {
     mtx_.lock();
     try {
@@ -648,6 +652,9 @@ public class Cache {
     return FAILURE; // indicate any other form of error
   }
 
+  /**
+   * Remove a file by signaling to Server such intent
+   */
   public int unlink(String path) {
     mtx_.lock();
     try {

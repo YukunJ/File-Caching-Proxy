@@ -49,9 +49,12 @@ class Proxy {
       fd_directory_set_ = new HashSet<>();
     }
 
+    /**
+     * Delegate Proxy to do the real communication with Server
+     * and optionally download necessary file
+     */
     public int open(String path, OpenOption o) {
       String normalized_path = Paths.get(path).normalize().toString();
-      // TODO: check if this path is within cache directory
       // normal file, delegate to Cache
       OpenReturnVal val = cache.open(normalized_path, o);
       int fd = val.fd;
@@ -68,6 +71,10 @@ class Proxy {
       return fd;
     }
 
+    /**
+     * When closing a file, the Proxy will upload new modification
+     * to Server if any
+     */
     public int close(int fd) {
       if (!fd_filehandle_map_.containsKey(fd) && !fd_directory_set_.contains(fd)) {
         return FileHandling.Errors.EBADF;
@@ -89,6 +96,11 @@ class Proxy {
       }
     }
 
+    /**
+     * Write could be done locally without reaching out to Server
+     * but when writing is expanding the file size, need to ask for
+     * more space from the Proxy's Cache
+     */
     public long write(int fd, byte[] buf) {
       if (!fd_filehandle_map_.containsKey(fd) || fd_directory_set_.contains(fd)) {
         // non-existing or write to a directory fd both give EBADF
@@ -117,6 +129,9 @@ class Proxy {
       return EIO;
     }
 
+    /**
+     * Read could be done without communication with Server
+     */
     public long read(int fd, byte[] buf) {
       if (fd_directory_set_.contains(fd)) {
         // read from a directory fd gives EISDIR
@@ -141,6 +156,9 @@ class Proxy {
       return EIO;
     }
 
+    /**
+     * Lseek could be done without communcation with Server
+     */
     public long lseek(int fd, long pos, LseekOption o) {
       if (!fd_filehandle_map_.containsKey(fd) || fd_directory_set_.contains(fd)) {
         return Errors.EBADF;
@@ -170,11 +188,18 @@ class Proxy {
       return EIO;
     }
 
+    /**
+     * Unlink will require the Proxy to communication with the Server
+     * to propogate such intent of deleting the file
+     */
     public int unlink(String path) {
       String normalized_path = Paths.get(path).normalize().toString();
       return cache.unlink(normalized_path);
     }
 
+    /*
+      Nothing special, just close every open file descriptors as clean-up
+     */
     public void clientdone() {
       for (int open_fd : fd_filehandle_map_.keySet()) {
         close(open_fd);

@@ -18,6 +18,9 @@ public class ValidateParam implements Serializable {
 
   FileHandling.OpenOption option;
 
+  /* send back the timestamp for this file, so that server could decide
+  if Proxy is holding a stale version and sends the Proxy updated version accordingly
+   */
   long proxy_timestamp;
 
   public ValidateParam(String path, FileHandling.OpenOption option, long proxy_timestamp) {
