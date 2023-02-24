@@ -10,8 +10,8 @@
 import java.io.Serializable;
 
 public class FileChunk implements Serializable {
-  /* 50KB tunable chunk size by default */
-  public static Integer CHUNK_SIZE = 50 * 1024;
+  /* 100KB tunable chunk size by default */
+  public static Integer CHUNK_SIZE = 100 * 1024;
 
   byte[] data = null;
   boolean end_of_file;

@@ -36,6 +36,8 @@ class Proxy {
 
   private static final String Colon = ":";
 
+  private static final int SUCCESS = 0;
+
   private static class FileHandler implements FileHandling {
     private static final int EIO = -5;
     private final HashMap<Integer, RandomAccessFile> fd_filehandle_map_;
@@ -55,7 +57,7 @@ class Proxy {
       int fd = val.fd;
       RandomAccessFile handle = val.file_handle;
       boolean is_directory = val.is_directory;
-      if (fd > 0) {
+      if (fd > SUCCESS) {
         if (!is_directory) {
           fd_filehandle_map_.put(fd, handle);
           fd_option_map_.put(fd, o);
@@ -63,40 +65,31 @@ class Proxy {
           fd_directory_set_.add(fd);
         }
       }
-      Logger.Log("open request: path=" + path + " normalized=" + normalized_path
-          + " option=" + Logger.OpenOptionToString(o) + " with return_fd=" + fd);
-      Cache.PrintCache();
       return fd;
     }
 
     public int close(int fd) {
-      Logger.Log("close request: fd=" + fd);
-      try {
-        if (!fd_filehandle_map_.containsKey(fd) && !fd_directory_set_.contains(fd)) {
-          return FileHandling.Errors.EBADF;
+      if (!fd_filehandle_map_.containsKey(fd) && !fd_directory_set_.contains(fd)) {
+        return FileHandling.Errors.EBADF;
+      }
+      if (fd_filehandle_map_.containsKey(fd)) {
+        RandomAccessFile handle = fd_filehandle_map_.get(fd);
+        try {
+          handle.close();
+          fd_filehandle_map_.remove(fd);
+          fd_option_map_.remove(fd);
+          return cache.close(fd);
+        } catch (IOException e) {
+          return EIO;
         }
-        if (fd_filehandle_map_.containsKey(fd)) {
-          RandomAccessFile handle = fd_filehandle_map_.get(fd);
-          try {
-            handle.close();
-            fd_filehandle_map_.remove(fd);
-            fd_option_map_.remove(fd);
-            return cache.close(fd);
-          } catch (IOException e) {
-            return EIO;
-          }
-        } else {
-          // close a dummy directory
-          fd_directory_set_.remove(fd);
-          return 0;
-        }
-      } finally {
-        Cache.PrintCache();
+      } else {
+        // close a dummy directory
+        fd_directory_set_.remove(fd);
+        return SUCCESS;
       }
     }
 
     public long write(int fd, byte[] buf) {
-      Logger.Log("write request: fd=" + fd + " of size " + buf.length);
       if (!fd_filehandle_map_.containsKey(fd) || fd_directory_set_.contains(fd)) {
         // non-existing or write to a directory fd both give EBADF
         return FileHandling.Errors.EBADF;
@@ -117,7 +110,6 @@ class Proxy {
           }
         }
         file_handle.write(buf);
-        Cache.PrintCache();
         return buf.length;
       } catch (Exception e) {
         e.printStackTrace();
@@ -126,7 +118,6 @@ class Proxy {
     }
 
     public long read(int fd, byte[] buf) {
-      Logger.Log("read request: fd=" + fd + " with destination capacity=" + buf.length);
       if (fd_directory_set_.contains(fd)) {
         // read from a directory fd gives EISDIR
         return Errors.EISDIR;
@@ -151,8 +142,6 @@ class Proxy {
     }
 
     public long lseek(int fd, long pos, LseekOption o) {
-      Logger.Log("lseek request: fd=" + fd + " pos=" + pos
-          + " LseekOption=" + Logger.SeekOptionToString(o));
       if (!fd_filehandle_map_.containsKey(fd) || fd_directory_set_.contains(fd)) {
         return Errors.EBADF;
       }
@@ -183,16 +172,10 @@ class Proxy {
 
     public int unlink(String path) {
       String normalized_path = Paths.get(path).normalize().toString();
-      Logger.Log("unlink request: path=" + path + " normalized=" + normalized_path);
-      try {
-        return cache.unlink(normalized_path);
-      } finally {
-        Cache.PrintCache();
-      }
+      return cache.unlink(normalized_path);
     }
 
     public void clientdone() {
-      // TODO: in cpkt2&3, notice proxy/server to clear up space
       for (int open_fd : fd_filehandle_map_.keySet()) {
         close(open_fd);
       }
@@ -215,8 +198,6 @@ class Proxy {
     Long cache_capacity = Long.parseLong(args[3]);
     String server_lookup = Slash + Slash + server_address + Colon + server_port + Slash
         + FileManagerRemote.SERVER_NAME;
-    Logger.Log("Proxy starts running with cache_dir=" + cache_dir
-        + " and server lookup address=" + server_lookup);
     FileManagerRemote remote_manager = (FileManagerRemote) Naming.lookup(server_lookup);
     Proxy.cache.SetCacheDirectory(cache_dir);
     Proxy.cache.SetCacheCapacity(cache_capacity);

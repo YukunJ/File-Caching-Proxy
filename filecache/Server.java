@@ -27,6 +27,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 public class Server extends UnicastRemoteObject implements FileManagerRemote {
   /* Server side disk manager to verify the status of a file on service dir */
   class ServerFileChecker implements FileChecker {
+    private final int SUCCESS = 0;
     @Override
     public boolean IfExist(String path) {
       return new File(path).exists();
@@ -82,7 +83,7 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
           // no read permission with this directory
           return FileHandling.Errors.EPERM;
         }
-        return 0;
+        return SUCCESS;
       }
       if (!if_regular) {
         // not a regular file
@@ -113,7 +114,7 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
           return FileHandling.Errors.EPERM;
         }
       }
-      return 0; // no error detected
+      return SUCCESS; // no error detected
     }
 
     @Override
@@ -121,7 +122,7 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
       long server_file_timestamp = file_to_timestamp_map_.getOrDefault(path, SERVER_NO_EXIST);
       int error_code = ErrorCheck(path, option);
       ValidateResult res = new ValidateResult(error_code, IfDirectory(path), server_file_timestamp);
-      if (error_code == 0 && server_file_timestamp != SERVER_NO_EXIST
+      if (error_code == SUCCESS && server_file_timestamp != SERVER_NO_EXIST
           && (timestamp != server_file_timestamp
               || new File(path).lastModified() != file_to_last_modified_.get(path))) {
         // the server shall provide updated version to proxy
@@ -183,6 +184,15 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
 
   private final String root_dir_;
 
+  private final static int SUCCESS = 0;
+  private static final int TIMESTAMP_INDEX = 0;
+
+  private static final int CHUNK_INDEX = 1;
+
+  private static final int ZERO = 0;
+
+  private static final int TUPLE_SIZE = 2;
+
   private final FileChecker checker_;
   public Server(String root_dir) throws RemoteException {
     super(0);
@@ -208,8 +218,6 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
     }
     FileHandling.OpenOption option = param.option;
     long validation_timestamp = param.proxy_timestamp;
-    Logger.Log(
-        "Validate Request of path=" + path + " with proxy-side timestamp=" + validation_timestamp);
     mtx_.lock();
     try {
       return checker_.Validate(path, option, validation_timestamp);
@@ -252,7 +260,6 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
   @Override
   public Long[] Upload(String path, FileChunk chunk) throws RemoteException, IOException {
     path = FormatPath(path);
-    Logger.Log("Upload Request of path=" + path);
     // create all parent directories if not exist
     mtx_.lock();
     try {
@@ -263,7 +270,7 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
       Long chunk_id = (long) file_chunk_id++;
       RandomAccessFile file = new RandomAccessFile(path, WRITER_MODE);
       // clear the content of the file if existing
-      file.setLength(0);
+      file.setLength(ZERO);
       file.write(chunk.data);
       if (chunk.end_of_file) {
         file.close();
@@ -274,9 +281,9 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
         file_to_lock_.get(path).writeLock().lock();
       }
       file_to_timestamp_map_.put(path, ++timestamp_);
-      Long[] tuple = new Long[2];
-      tuple[0] = timestamp_;
-      tuple[1] = chunk_id;
+      Long[] tuple = new Long[TUPLE_SIZE];
+      tuple[TIMESTAMP_INDEX] = timestamp_;
+      tuple[CHUNK_INDEX] = chunk_id;
       return tuple;
     } finally {
       mtx_.unlock();
@@ -315,7 +322,6 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
     assert (file_to_lock_.containsKey(full_path));
     file_to_lock_.get(full_path).readLock().unlock();
     chunk_id_to_file_.remove(chunk_id);
-    Logger.Log("Proxy CancelChunk request for file=" + full_path);
   }
 
   /**
@@ -324,7 +330,6 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
   @Override
   public int Delete(String path) throws RemoteException {
     path = FormatPath(path);
-    Logger.Log("Delete Request of path=" + path);
     mtx_.lock();
     try {
       File f = new File(path);
@@ -340,7 +345,7 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
         file_to_lock_.remove(path);
         file_to_last_modified_.remove(path);
       }
-      return (success) ? 0 : FileHandling.Errors.EPERM;
+      return (success) ? SUCCESS : FileHandling.Errors.EPERM;
     } catch (SecurityException e) {
       e.printStackTrace();
       return FileHandling.Errors.EPERM;
@@ -360,10 +365,7 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
     try {
       File root = new File(root_dir_);
       ScanVersionHelper(((root.getName().equals(".")) ? "" : root.getName() + Slash), root);
-      // Logging purpose
-      Logger.Log("Server root_dir initial timestamp versioning:");
       for (String filename : file_to_timestamp_map_.keySet()) {
-        Logger.Log(filename + " : " + file_to_timestamp_map_.get(filename));
       }
     } finally {
       mtx_.unlock();
@@ -396,7 +398,6 @@ public class Server extends UnicastRemoteObject implements FileManagerRemote {
   public static void main(String[] args) throws RemoteException, MalformedURLException {
     int port = Integer.parseInt(args[0]);
     String root_dir = args[1];
-    Logger.Log("Server starts running on port=" + port + " with root_dir=" + root_dir);
     try {
       LocateRegistry.createRegistry(port);
     } catch (RemoteException e) {
